@@ -25,9 +25,11 @@ from datetime import datetime
 
 # ---------- GitHub (persistência durável) ----------
 # Configure os secrets no painel do Streamlit Cloud:
-# GH_TOKEN, GH_REPO (= "usuario/repositorio"), GH_PATH (ex: "data"), GH_BRANCH (ex: "main"), GH_COMMITS_AUTHOR
+# GH_TOKEN, GH_REPO (= "usuario/repositorio"), GH_PATH (ex: "data"), GH_BRANCH (ex: "main")
+# GH_COMMITS_AUTHOR="Nome <email>" ou GH_COMMITS_NAME/ GH_COMMITS_EMAIL
+
 try:
-    from github import Github, GithubException
+    from github import Github, GithubException, InputGitAuthor
     GITHUB_AVAILABLE = True
 except Exception:
     GITHUB_AVAILABLE = False
@@ -55,6 +57,34 @@ def _github_repo():
     except Exception:
         return None
 
+def _git_author():
+    """
+    Constrói um InputGitAuthor a partir dos secrets.
+    Pode usar:
+      - GH_COMMITS_AUTHOR="Nome Sobrenome <email@dominio.com>"
+         ou
+      - GH_COMMITS_NAME="Nome Sobrenome" e GH_COMMITS_EMAIL="email@dominio.com"
+    Se nada for fornecido, usa um padrão neutro.
+    """
+    author_str = st.secrets.get("GH_COMMITS_AUTHOR", "")
+    name = st.secrets.get("GH_COMMITS_NAME", "")
+    email = st.secrets.get("GH_COMMITS_EMAIL", "")
+
+    if (not name or not email) and author_str and "<" in author_str and ">" in author_str:
+        try:
+            n, e = author_str.split("<", 1)
+            name = n.strip()
+            email = e.replace(">", "").strip()
+        except Exception:
+            pass
+
+    if not name:
+        name = "Streamlit Bot"
+    if not email:
+        email = "bot@example.com"
+
+    return InputGitAuthor(name, email)
+
 def gh_path_for(mkey: str, ftype: str) -> str:
     base = st.secrets.get("GH_PATH", "data")
     return f"{base}/{mkey}/{ftype}.csv"
@@ -66,17 +96,37 @@ def save_month_to_github(mkey: str, raw_month_data: dict) -> bool:
         return False
     cleaned = validate_and_clean(raw_month_data)
     branch = st.secrets.get("GH_BRANCH", "main")
-    author = st.secrets.get("GH_COMMITS_AUTHOR", "Streamlit Bot <bot@example.com>")
+    author = _git_author()
+
     for t, df in cleaned.items():
         path = gh_path_for(mkey, t)
         content = df.to_csv(index=False)
-        message = f"update {path}"
+        message_update = f"update {path}"
+        message_create = f"create {path}"
+
         try:
+            # Existe? -> update
             file = repo.get_contents(path, ref=branch)
-            repo.update_file(path, message, content, file.sha, branch=branch, author=author)
+            repo.update_file(
+                path,
+                message_update,
+                content,
+                file.sha,
+                branch=branch,
+                author=author,
+                committer=author,   # opcional
+            )
         except GithubException as ge:
             if ge.status == 404:
-                repo.create_file(path, f"create {path}", content, branch=branch, author=author)
+                # Não existe? -> create
+                repo.create_file(
+                    path,
+                    message_create,
+                    content,
+                    branch=branch,
+                    author=author,
+                    committer=author,  # opcional
+                )
             else:
                 st.error(f"[GitHub] Falha ao salvar {path}: {ge}")
                 return False
@@ -96,7 +146,6 @@ def load_all_from_github() -> dict:
     try:
         months = repo.get_contents(base, ref=branch)
     except GithubException as ge:
-        # pasta base ainda não existe
         if ge.status == 404:
             return {}
         st.warning(f"[GitHub] Não consegui listar {base}: {ge}")
@@ -411,22 +460,14 @@ def load_all_from_disk() -> dict:
 
 def replace_single_file(mkey: str, ftype: str, uploaded_xlsx):
     """Substitui um tipo específico para um mês (em memória + salva em GH/disk)."""
-    # Reconstrói um 'raw' usando o que estiver em memória ou em GH/disk
     raw = {}
-    # base: dados já carregados no app
     if mkey in st.session_state.data:
         for t, df in st.session_state.data[mkey].items():
             raw[t] = df
-
-    # aplica o novo excel
     df_new = read_excel_result_sheet(uploaded_xlsx)
     raw[ftype] = df_new
-
-    # salva local
     save_month_to_disk(mkey, raw)
-    # salva GH
     ok_gh = save_month_to_github(mkey, raw)
-    # reflete em memória carregando do GH (preferível) ou do disco
     refreshed = load_all_from_github()
     if refreshed:
         for mk, payload in refreshed.items():
@@ -594,9 +635,14 @@ if imp_file is not None:
 st.sidebar.markdown("---")
 st.sidebar.subheader("Manutenção")
 
-all_months = sorted(set(st.session_state.data.keys())
-                    | set(os.listdir(DATA_DIR) if os.path.isdir(DATA_DIR) else [])
-                    | set(load_all_from_github().keys()))
+# Conjunto completo de meses: sessão + disco + GitHub
+all_months = set(st.session_state.data.keys())
+if os.path.isdir(DATA_DIR):
+    all_months |= set(os.listdir(DATA_DIR))
+gh_loaded = load_all_from_github()
+all_months |= set(gh_loaded.keys())
+all_months = sorted(all_months)
+
 sel_m = st.sidebar.selectbox("Mês para trocar arquivo", ["(nenhum)"] + all_months)
 sel_t = st.sidebar.selectbox("Tipo de arquivo", REQUIRED_TYPES + OPTIONAL_TYPES)
 file_replace = st.sidebar.file_uploader("Novo .xlsx para esse tipo", type=["xlsx"], key="replace_one")
