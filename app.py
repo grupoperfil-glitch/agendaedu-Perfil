@@ -776,10 +776,15 @@ with tabs[2]:
                 "taxa_conclusao": k.get("completion_rate"),
                 "tempo_atendimento_s": k.get("handle_avg_sec"),
                 "tempo_espera_s": k.get("wait_avg_sec"),
+                st.plotly_chart(
+    px.line(comp, x="mes", y="tempo_espera_h", markers=True, title="Tempo médio de espera (h)"),
+    use_container_width=True
                 "csat_medio": k.get("csat_avg"),
                 "cobertura_%": k.get("eval_coverage"),
             })
         comp = pd.DataFrame(rows).sort_values("mes")
+        # CONVERSÃO PARA HORAS
+        comp["tempo_espera_h"] = comp["tempo_espera_s"] / 3600
         st.dataframe(comp, use_container_width=True)
         st.download_button("Baixar comparativo (CSV)", data=comp.to_csv(index=False).encode("utf-8"),
                            file_name="comparativo_mensal.csv")
@@ -825,3 +830,4 @@ with tabs[3]:
 - GitHub (recomendado) via `GH_TOKEN`/`GH_REPO`/`GH_PATH`/`GH_BRANCH`
 - Fallback local em `data_store/AAAA-MM/*.csv`
 """)
+
