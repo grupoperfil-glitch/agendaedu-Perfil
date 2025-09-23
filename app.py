@@ -522,7 +522,7 @@ st.sidebar.title("Parâmetros do Mês")
 
 col_m, col_y = st.sidebar.columns(2)
 month = col_m.selectbox("Mês", list(range(1, 13)), format_func=lambda x: f"{x:02d}")
-# ====== ALTERAÇÃO: anos fixos de 2025 a 2030 ======
+# ====== Anos fixos de 2025 a 2030 ======
 year = col_y.selectbox("Ano", list(range(2025, 2031)))
 current_month_key = month_key(year, month)
 
@@ -754,8 +754,17 @@ with tabs[1]:
         with col4:
             if "_wait_seconds" in dfc.columns:
                 dft = dfc.copy()
-                dft["Tempo médio de espera (s)"] = dft["_wait_seconds"]
-                st.plotly_chart(px.bar(dft, x="Canal", y="Tempo médio de espera (s)", title="Tempo médio de espera (s)"), use_container_width=True)
+                # --------- CONVERSÃO PARA HORAS ----------
+                dft["Tempo médio de espera (h)"] = dft["_wait_seconds"] / 3600
+                st.plotly_chart(
+                    px.bar(
+                        dft,
+                        x="Canal",
+                        y="Tempo médio de espera (h)",
+                        title="Tempo médio de espera (horas)"
+                    ),
+                    use_container_width=True
+                )
         st.markdown("---")
         st.plotly_chart(px.bar(dfc, x="Canal", y="Média CSAT", title="CSAT médio por canal"), use_container_width=True)
 
@@ -776,28 +785,48 @@ with tabs[2]:
                 "taxa_conclusao": k.get("completion_rate"),
                 "tempo_atendimento_s": k.get("handle_avg_sec"),
                 "tempo_espera_s": k.get("wait_avg_sec"),
-                st.plotly_chart(
-    px.line(comp, x="mes", y="tempo_espera_h", markers=True, title="Tempo médio de espera (h)"),
-    use_container_width=True
                 "csat_medio": k.get("csat_avg"),
                 "cobertura_%": k.get("eval_coverage"),
             })
+
         comp = pd.DataFrame(rows).sort_values("mes")
-        # CONVERSÃO PARA HORAS
-        comp["tempo_espera_h"] = comp["tempo_espera_s"] / 3600
+
+        # --------- NOVO: coluna em horas a partir dos segundos ----------
+        if "tempo_espera_s" in comp.columns:
+            comp["tempo_espera_h"] = comp["tempo_espera_s"] / 3600
+
         st.dataframe(comp, use_container_width=True)
-        st.download_button("Baixar comparativo (CSV)", data=comp.to_csv(index=False).encode("utf-8"),
-                           file_name="comparativo_mensal.csv")
+        st.download_button(
+            "Baixar comparativo (CSV)",
+            data=comp.to_csv(index=False).encode("utf-8"),
+            file_name="comparativo_mensal.csv"
+        )
+
         c1, c2 = st.columns(2)
         with c1:
-            st.plotly_chart(px.line(comp, x="mes", y="total", markers=True, title="Total de atendimentos (mensal)"), use_container_width=True)
+            st.plotly_chart(
+                px.line(comp, x="mes", y="total", markers=True, title="Total de atendimentos (mensal)"),
+                use_container_width=True
+            )
         with c2:
-            st.plotly_chart(px.line(comp, x="mes", y="taxa_conclusao", markers=True, title="Taxa de conclusão (%)"), use_container_width=True)
+            st.plotly_chart(
+                px.line(comp, x="mes", y="taxa_conclusao", markers=True, title="Taxa de conclusão (%)"),
+                use_container_width=True
+            )
+
         c3, c4 = st.columns(2)
         with c3:
-            st.plotly_chart(px.line(comp, x="mes", y="csat_medio", markers=True, title="CSAT médio (1–5)"), use_container_width=True)
+            st.plotly_chart(
+                px.line(comp, x="mes", y="csat_medio", markers=True, title="CSAT médio (1–5)"),
+                use_container_width=True
+            )
         with c4:
-            st.plotly_chart(px.line(comp, x="mes", y="tempo_espera_s", markers=True, title="Tempo médio de espera (s)"), use_container_width=True)
+            y_col = "tempo_espera_h" if "tempo_espera_h" in comp.columns else "tempo_espera_s"
+            y_title = "Tempo médio de espera (h)" if y_col == "tempo_espera_h" else "Tempo médio de espera (s)"
+            st.plotly_chart(
+                px.line(comp, x="mes", y=y_col, markers=True, title=y_title),
+                use_container_width=True
+            )
 
 # 4) Dicionário de Dados
 with tabs[3]:
@@ -830,4 +859,3 @@ with tabs[3]:
 - GitHub (recomendado) via `GH_TOKEN`/`GH_REPO`/`GH_PATH`/`GH_BRANCH`
 - Fallback local em `data_store/AAAA-MM/*.csv`
 """)
-
