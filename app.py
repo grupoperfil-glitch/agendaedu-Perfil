@@ -10,11 +10,12 @@
 #   GITHUB_DATA_PATH    = "data"                            # subpasta contendo os .xlsx
 #
 # O app:
-#  - Baixa o repositório como ZIP (codeload.github.com) e lê TODOS os .xlsx dentro de GITHUB_DATA_PATH,
-#    agrupando por mês (YYYY-MM) encontrado no caminho ou no nome do arquivo (mesmo com timestamp).
+#  - Baixa o repositório como ZIP (via API zipball ou codeload) e lê TODOS os .xlsx dentro de GITHUB_DATA_PATH,
+#    agrupando por mês (YYYY-MM) encontrado no caminho ou no nome do arquivo (mesmo com outros separadores).
 #  - **Upload por arquivo** (como no v2): campos separados para cada tipo esperado do mês atual.
 #  - Converte “Tempo médio de atendimento” **para HORAS** (regra estrita) na aba Por Canal.
 #  - Nova aba “Análise dos Canais”: (a) piores por **menor quantidade de respostas CSAT**; (b) **menores notas** (CSAT <= 3.0).
+#  - **Autotestes/Diagnóstico** na barra lateral para verificar conexão GitHub e mapeamento de meses.
 
 from __future__ import annotations
 import os, re
@@ -188,7 +189,11 @@ def build_by_channel(payload: dict) -> dict:
 # ======================
 
 def fetch_repo_zip_bytes() -> Optional[bytes]:
-    # 1) Tenta API zipball (suporta repositórios privados)
+    """Baixa o ZIP do repo.
+    1) Tenta a API zipball com token (permite repositórios privados)
+    2) Fallback para codeload (público)
+    """
+    # 1) API zipball
     headers = {}
     if GH_TOKEN:
         headers["Authorization"] = f"Bearer {GH_TOKEN}"
@@ -200,7 +205,7 @@ def fetch_repo_zip_bytes() -> Optional[bytes]:
             return r.content
     except Exception as e:
         LAST_GH_STATUS.append(f"ERR API ZIP: {e}")
-    # 2) Fallback para codeload (público; alguns ambientes aceitam header 'token')
+    # 2) Fallback codeload
     try:
         headers2 = {}
         if GH_TOKEN:
@@ -212,10 +217,6 @@ def fetch_repo_zip_bytes() -> Optional[bytes]:
     except Exception as e2:
         LAST_GH_STATUS.append(f"ERR ZIP (codeload): {e2}")
     return None
-        return r.content
-    except Exception as e:
-        LAST_GH_STATUS.append(f"ERR ZIP: {e}")
-        return None
 
 
 def group_zip_files_by_month(zf: ZipFile) -> Dict[str, List[str]]:
@@ -376,6 +377,28 @@ with st.sidebar:
         st.write(f"Meses carregados agora: **{gh_loaded}** | Arquivos vistoriados: **{gh_files}** | Fallback local: **{local_loaded}**")
         if LAST_GH_STATUS:
             st.code("\n".join(LAST_GH_STATUS[-10:]))
+
+    # ======================
+    # Testes / Autodiagnóstico
+    # ======================
+    with st.expander("Testes (autodiagnóstico)"):
+        if st.button("Rodar autoteste de conexão GitHub"):
+            b = fetch_repo_zip_bytes()
+            if not b:
+                st.error("Falha ao baixar ZIP do GitHub. Verifique token, repo/branch e GH_PATH.")
+            else:
+                st.success(f"ZIP baixado com sucesso ({len(b)} bytes).")
+                with ZipFile(BytesIO(b)) as zf:
+                    names = zf.namelist()
+                    st.write("Primeiros caminhos no ZIP:")
+                    st.code("\n".join(names[:20]))
+                    # filtro por GH_PATH
+                    root = names[0].split("/")[0] if names else ""
+                    base_prefix = f"{root}/{GH_PATH.strip('/')}/" if GH_PATH else f"{root}/"
+                    in_path = [n for n in names if n.startswith(base_prefix) and n.lower().endswith('.xlsx')]
+                    st.write(f"Arquivos .xlsx encontrados sob GH_PATH: **{len(in_path)}**")
+                    grouped = group_zip_files_by_month(zf)
+                    st.write(f"Meses mapeados: {sorted(grouped.keys())}")
 
     st.write("---")
     st.subheader("Upload mensal (.xlsx)")
