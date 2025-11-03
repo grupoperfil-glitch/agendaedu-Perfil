@@ -697,6 +697,25 @@ with tabs[0]:
                   help=f"SLA ≥ {SLA['EVAL_COVERAGE_MIN']}% {icon(ok, warn)}")
 
         st.markdown("---")
+        # --- Novo: Distribuição das avaliações de CSAT (mês) ---
+        st.write("### Distribuição das avaliações de CSAT (mês)")
+        dist = payload.get("csat")
+        if isinstance(dist, pd.DataFrame) and not dist.empty:
+            cat_col = find_best_column(dist, ["Categoria","categoria"])
+            score_col = find_best_column(dist, ["score_total","total","count","qtd","qtde"])
+            if cat_col and score_col:
+                df_dist = dist[[cat_col, score_col]].copy()
+                df_dist[score_col] = pd.to_numeric(df_dist[score_col], errors="coerce")
+                df_dist = df_dist.dropna()
+                df_dist = df_dist.groupby(cat_col, as_index=False)[score_col].sum()
+                fig = px.bar(df_dist, x=cat_col, y=score_col, title="Distribuição de CSAT por categoria (mês)", text=df_dist[score_col])
+                fig.update_layout(xaxis_title="", yaxis_title="Avaliações")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Não foi possível identificar colunas de Categoria/score_total no arquivo de CSAT do mês.")
+        else:
+            st.info("Arquivo de distribuição de CSAT do mês não encontrado (ex.: _data_product__csat_*.xlsx ou csat_by_cat.csv).")
+
         st.write("### Tabelas disponíveis no mês")
         for kname, vdf in payload.items():
             if isinstance(vdf, pd.DataFrame):
@@ -819,90 +838,82 @@ with tabs[3]:
     """)
 
 
-# 5) Análise dos Canais — novos requisitos
+# 5) Análise dos Canais — mês atual
 with tabs[4]:
-    st.subheader("Análise dos Canais")
-    st.caption("Por mês: (a) canais com MENOR quantidade de respostas do CSAT; (b) canais com **menores notas** (CSAT ≤ 3.0).")
+    st.subheader("Análise dos Canais (mês atual)")
+    st.caption("Mostra (1) canais com **Média CSAT < 4** e (2) **cobertura de avaliação** por canal (Respostas CSAT / Concluídos).")
 
-    months_dict = st.session_state["months"]
-    if not months_dict:
-        st.info("Nenhum mês carregado.")
+    payload = st.session_state["months"].get(mk, {})
+    dfc = get_current_by_channel()
+    if not isinstance(dfc, pd.DataFrame) or dfc.empty:
+        st.info("Sem dados por canal para o mês selecionado.")
     else:
+        dfc = normalize_canal_column(dfc.copy())
+        colmap = {str(c).strip().lower(): c for c in dfc.columns}
+        # Colunas candidatas
+        csat_candidates = ["Média CSAT","media csat","avg","media"]
         count_candidates = [
             "Respostas CSAT","Quantidade de respostas CSAT","qtd respostas csat","qtd csat",
             "Respostas","Avaliadas","Avaliações","Total de avaliações",
             "Ratings","score_total","qtde","qtd"
         ]
-        csat_candidates = ["Média CSAT","media csat","avg","media","CSAT","csat","CSAT Médio","csat médio"]
+        concluded_candidates = [
+            "Total de atendimentos concluídos","concluidos","concluídos","atendimentos concluidos","atendimentos concluídos"
+        ]
 
-        rec_counts, rec_scores = [], []
+        csat_col = None
+        for c in csat_candidates:
+            if c.lower() in colmap:
+                csat_col = colmap[c.lower()]
+                break
 
-        for mkey, payload in sorted(months_dict.items()):
-            df = payload.get("by_channel")
-            if not isinstance(df, pd.DataFrame) or df.empty:
-                for v in payload.values():
-                    if isinstance(v, pd.DataFrame) and "Canal" in normalize_canal_column(v).columns:
-                        df = normalize_canal_column(v)
-                        break
-            if not isinstance(df, pd.DataFrame) or df.empty:
-                continue
-
-            df = normalize_canal_column(df.copy())
-            colmap = {str(c).strip().lower(): c for c in df.columns}
-
-            # contagem de respostas CSAT
-            ccol = None
-            for c in count_candidates:
-                if c.lower() in colmap: ccol = colmap[c.lower()]; break
-            if ccol is not None:
-                tmp = df[["Canal", ccol]].copy()
-                tmp[ccol] = pd.to_numeric(tmp[ccol], errors="coerce")
-                tmp = tmp.dropna()
-                if not tmp.empty:
-                    tmp = tmp.rename(columns={ccol: "Respostas CSAT"})
-                    tmp["mes"] = mkey
-                    rec_counts.append(tmp)
-
-            # média csat (filtrar <= 3.0)
-            scol = None
-            for c in csat_candidates:
-                if c.lower() in colmap: scol = colmap[c.lower()]; break
-            if scol is not None:
-                tmp2 = df[["Canal", scol]].copy()
-                tmp2[scol] = pd.to_numeric(tmp2[scol], errors="coerce")
-                tmp2 = tmp2.dropna()
-                if not tmp2.empty:
-                    tmp2 = tmp2.rename(columns={scol: "Média CSAT"})
-                    tmp2 = tmp2[tmp2["Média CSAT"] <= 3.0]  # <= 3.0 (notas 1,2,3)
-                    tmp2["mes"] = mkey
-                    rec_scores.append(tmp2)
-
-        colA, colB = st.columns(2)
-
-        with colA:
-            st.markdown("**Menor quantidade de respostas do CSAT por mês**")
-            n_counts = st.number_input("Quantos canais exibir (menores quantidades)?", 1, 10, 3, 1, key="n_counts_new")
-            if not rec_counts:
-                st.warning("Não encontrei coluna de contagem de respostas por canal nos dados persistidos.")
+        # --- Gráfico 1: Canais com Média CSAT < 4 ---
+        st.markdown("#### 1) Canais com Média CSAT < 4")
+        if csat_col is None:
+            st.warning("Não encontrei coluna de 'Média CSAT' nos dados por canal deste mês.")
+        else:
+            low = dfc[["Canal", csat_col]].copy()
+            low[csat_col] = pd.to_numeric(low[csat_col], errors="coerce")
+            low = low.dropna()
+            low = low[low[csat_col] < 4.0]
+            if low.empty:
+                st.info("Nenhum canal com média CSAT abaixo de 4 neste mês.")
             else:
-                dd = pd.concat(rec_counts, ignore_index=True)
-                tops = [g.sort_values("Respostas CSAT", ascending=True).head(int(n_counts)) for _, g in dd.groupby("mes", as_index=False)]
-                dd_top = pd.concat(tops, ignore_index=True)
-                st.plotly_chart(px.bar(dd_top, x="mes", y="Respostas CSAT", color="Canal",
-                                       barmode="group", title="Menores quantidades de respostas (CSAT) por mês"),
-                                use_container_width=True)
-                st.dataframe(dd_top.sort_values(["mes","Respostas CSAT","Canal"]), use_container_width=True)
+                fig1 = px.bar(low.sort_values(csat_col), x="Canal", y=csat_col, title="Canais com média CSAT abaixo de 4")
+                fig1.update_layout(xaxis_title="", yaxis_title="Média CSAT")
+                st.plotly_chart(fig1, use_container_width=True)
 
-        with colB:
-            st.markdown("**Canais com menores notas de CSAT (≤ 3.0) por mês**")
-            n_scores = st.number_input("Quantos canais exibir (piores notas)?", 1, 10, 3, 1, key="n_scores_new")
-            if not rec_scores:
-                st.info("Não encontrei coluna de 'Média CSAT' por canal, ou não há notas ≤ 3.0.")
+        st.markdown("---")
+        # --- Gráfico 2: Cobertura de avaliação (%) por canal ---
+        st.markdown("#### 2) Cobertura de avaliação por canal (%)")
+        # localizar colunas de respostas e concluídos
+        ccol = None
+        for c in count_candidates:
+            if c.lower() in colmap:
+                ccol = colmap[c.lower()]
+                break
+        concl_col = None
+        for c in concluded_candidates:
+            if c.lower() in colmap:
+                concl_col = colmap[c.lower()]
+                break
+
+        if ccol is None or concl_col is None:
+            st.info("Para cobertura por canal, preciso de 'Respostas CSAT' e 'Total de atendimentos concluídos' no mesmo dataset por canal.")
+        else:
+            cov = dfc[["Canal", ccol, concl_col]].copy()
+            cov[ccol] = pd.to_numeric(cov[ccol], errors='coerce')
+            cov[concl_col] = pd.to_numeric(cov[concl_col], errors='coerce')
+            cov = cov.dropna()
+            cov = cov[cov[concl_col] > 0]
+            cov["Cobertura (%)"] = (cov[ccol] / cov[concl_col]) * 100.0
+            canais = sorted(cov["Canal"].astype(str).unique())
+            sel = st.multiselect("Escolha os canais", canais, default=canais, key="sel_cov_channels")
+            if sel:
+                cov = cov[cov["Canal"].astype(str).isin(sel)]
+            if cov.empty:
+                st.info("Sem dados após o filtro de canais.")
             else:
-                dd2 = pd.concat(rec_scores, ignore_index=True)
-                tops2 = [g.sort_values("Média CSAT", ascending=True).head(int(n_scores)) for _, g in dd2.groupby("mes", as_index=False)]
-                dd2_top = pd.concat(tops2, ignore_index=True)
-                st.plotly_chart(px.bar(dd2_top, x="mes", y="Média CSAT", color="Canal",
-                                       barmode="group", title="Menores notas de CSAT (≤ 3.0) por mês"),
-                                use_container_width=True)
-                st.dataframe(dd2_top.sort_values(["mes","Média CSAT","Canal"]), use_container_width=True)
+                fig2 = px.bar(cov, x="Canal", y="Cobertura (%)", title="Cobertura de avaliação (Respostas CSAT / Concluídos)")
+                fig2.update_layout(xaxis_title="", yaxis_title="%")
+                st.plotly_chart(fig2, use_container_width=True)
