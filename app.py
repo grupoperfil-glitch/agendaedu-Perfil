@@ -1,31 +1,48 @@
-# app.py — Dashboard CSAT Mensal (XLSX) — Persistência GitHub/Local
-# ---------------------------------------------------------------
+# app.py — Dashboard CSAT (XLSX) — GitHub + Upload mensal (nomes com timestamp)
+# -----------------------------------------------------------------------------
 # Requisitos:
 #   pip install streamlit plotly pandas numpy openpyxl requests
 #
-# Abas:
-#   1) Visão Geral
-#   2) Por Canal  ---> CONVERSÃO ESTRITA p/ horas em "Tempo médio de atendimento (horas)"
-#   3) Comparativo Mensal
-#   4) Dicionário de Dados
-#   5) Análise dos Canais
+# Secrets recomendados (Streamlit Cloud / .streamlit/secrets.toml):
+#   GITHUB_DATA_TOKEN   = "ghp_xxx"                         # opcional (evita rate limit)
+#   GITHUB_DATA_REPO    = "grupoperfil-glitch/csat-dashboard-data"
+#   GITHUB_DATA_BRANCH  = "main"
+#   GITHUB_DATA_PATH    = "data"                            # onde estão os .xlsx
+#
+# O app:
+#  - Lê do GitHub os .xlsx, com ou sem subpastas YYYY-MM, aceitando nomes com timestamps.
+#  - Aceita upload múltiplo mensal (vários .xlsx de uma vez); detecta o tipo pelo nome.
+#  - Converte “Tempo médio de atendimento” para HORAS de forma estrita.
+#  - Traz a aba “Análise dos Canais”.
 
 from __future__ import annotations
-import os
+import os, re, json, base64
 from io import BytesIO
 from datetime import date
-import base64
-import json
+from typing import Dict, List, Optional
 
+import requests
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-# =========================
-# Persistência (local/GitHub)
-# =========================
+# ======================
+# Config & helpers
+# ======================
+def _get_secret(name: str, default: str = "") -> str:
+    try:
+        return st.secrets.get(name, os.getenv(name, default))
+    except Exception:
+        return os.getenv(name, default)
+
+GH_REPO   = _get_secret("GITHUB_DATA_REPO",   "grupoperfil-glitch/csat-dashboard-data")
+GH_BRANCH = _get_secret("GITHUB_DATA_BRANCH", "main")
+GH_PATH   = _get_secret("GITHUB_DATA_PATH",   "data").strip("/")
+GH_TOKEN  = _get_secret("GITHUB_DATA_TOKEN",  "")
+
 LOCAL_STORE_DIR = "data_store"
+GH_API_BASE = "https://api.github.com"
 
 def ensure_dir(p: str) -> None:
     os.makedirs(p, exist_ok=True)
@@ -33,8 +50,11 @@ def ensure_dir(p: str) -> None:
 def month_key(y: int, m: int) -> str:
     return f"{y:04d}-{m:02d}"
 
+# ======================
+# Leitura de Excel
+# ======================
 def load_xlsx(file: BytesIO | str) -> pd.DataFrame:
-    """Carrega Excel. Tenta 'Resultado da consulta', senão 1ª aba."""
+    """Carrega Excel; tenta aba 'Resultado da consulta'; senão, 1ª aba."""
     try:
         xl = pd.ExcelFile(file)
         sheet = "Resultado da consulta" if "Resultado da consulta" in xl.sheet_names else xl.sheet_names[0]
@@ -42,80 +62,12 @@ def load_xlsx(file: BytesIO | str) -> pd.DataFrame:
     except Exception:
         return pd.read_excel(file)
 
-def read_local_month_payload(y: int, m: int) -> dict:
-    mk = month_key(y, m)
-    folder = os.path.join(LOCAL_STORE_DIR, mk)
-    payload = {}
-    if not os.path.isdir(folder):
-        return payload
+def load_xlsx_from_bytes(b: bytes) -> pd.DataFrame:
+    return load_xlsx(BytesIO(b))
 
-    def try_read(startswith_list: list[str]) -> pd.DataFrame | None:
-        for f in os.listdir(folder):
-            low = f.lower()
-            if any(low.startswith(p) and low.endswith(".xlsx") for p in startswith_list):
-                try:
-                    return load_xlsx(os.path.join(folder, f))
-                except Exception:
-                    pass
-        return None
-
-    df_csat  = try_read(["data_product__csat"])
-    df_media = try_read(["data_product__media_csat"])
-    df_tma   = try_read(["tempo_medio_de_atendimento", "tempo_medio_atendimento", "tma"])
-
-    if df_csat  is not None: payload["csat"] = df_csat
-    if df_media is not None: payload["media_csat"] = df_media
-    if df_tma   is not None: payload["tma_por_canal"] = df_tma
-
-    payload = build_by_channel(payload)
-    return payload
-
-def save_df_local(df: pd.DataFrame, path: str) -> None:
-    ensure_dir(os.path.dirname(path))
-    df.to_excel(path, index=False)
-
-def write_local_month_payload(y: int, m: int, payload: dict, save_flags: dict):
-    mk = month_key(y, m)
-    folder = os.path.join(LOCAL_STORE_DIR, mk)
-    ensure_dir(folder)
-
-    if save_flags.get("save_local", True):
-        if "csat" in payload:        save_df_local(payload["csat"], os.path.join(folder, "data_product__csat.xlsx"))
-        if "media_csat" in payload:  save_df_local(payload["media_csat"], os.path.join(folder, "data_product__media_csat.xlsx"))
-        if "tma_por_canal" in payload: save_df_local(payload["tma_por_canal"], os.path.join(folder, "tempo_medio_de_atendimento.xlsx"))
-
-    if save_flags.get("save_github"):
-        gh_token = os.getenv("GITHUB_TOKEN")
-        gh_repo  = os.getenv("GITHUB_REPO")  # ex.: "org/repo"
-        gh_path  = os.getenv("GITHUB_PATH", "data_store").strip("/")
-        if gh_token and gh_repo:
-            import requests
-            base_url = f"https://api.github.com/repos/{gh_repo}/contents"
-            branch = os.getenv("GITHUB_BRANCH", "main")
-
-            def push_df(df: pd.DataFrame, relname: str):
-                path = f"{gh_path}/{mk}/{relname}"
-                buf = BytesIO()
-                df.to_excel(buf, index=False)
-                content_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-                # get sha (if exists)
-                r = requests.get(f"{base_url}/{path}", headers={"Authorization": f"token {gh_token}"})
-                sha = r.json().get("sha") if r.status_code == 200 else None
-                body = {"message": f"update {path}", "content": content_b64, "branch": branch}
-                if sha: body["sha"] = sha
-                r2 = requests.put(f"{base_url}/{path}", headers={"Authorization": f"token {gh_token}"}, data=json.dumps(body))
-                if r2.status_code not in (200, 201):
-                    st.warning(f"Falha ao enviar {relname} ao GitHub ({r2.status_code}).")
-
-            if "csat" in payload:        push_df(payload["csat"], "data_product__csat.xlsx")
-            if "media_csat" in payload:  push_df(payload["media_csat"], "data_product__media_csat.xlsx")
-            if "tma_por_canal" in payload: push_df(payload["tma_por_canal"], "tempo_medio_de_atendimento.xlsx")
-        else:
-            st.info("Persistência GitHub não configurada (defina GITHUB_TOKEN e GITHUB_REPO).")
-
-# =========================
-# Funções de dados
-# =========================
+# ======================
+# Normalização de dados
+# ======================
 def normalize_canal_column(df: pd.DataFrame) -> pd.DataFrame:
     if "Canal" in df.columns:
         return df
@@ -125,83 +77,237 @@ def normalize_canal_column(df: pd.DataFrame) -> pd.DataFrame:
             return df.rename(columns={lower[alias]: "Canal"})
     return df
 
-def find_best_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
+def find_best_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     lower = {str(c).strip().lower(): c for c in df.columns}
     for c in candidates:
-        if c.strip().lower() in lower:
-            return lower[c.strip().lower()]
+        k = c.strip().lower()
+        if k in lower:
+            return lower[k]
     return None
 
 def to_hours_strict(series: pd.Series) -> pd.Series:
     """Conversão ESTRITA:
-       - valores com ':' -> HH:MM:SS -> horas
-       - valores numéricos -> SEMPRE segundos -> horas
+       - string com ':' => HH:MM:SS => horas
+       - numérico => SEMPRE segundos => horas
     """
     s_str = series.astype(str)
-    has_colon = s_str.str.contains(":")
+    has_colon = s_str.str.contains(":", regex=False)
     out = pd.Series(index=series.index, dtype="float64")
-
-    # casos HH:MM:SS
+    # HH:MM:SS
     td = pd.to_timedelta(s_str.where(has_colon, None), errors="coerce")
     out.loc[has_colon] = td.dt.total_seconds() / 3600.0
-
-    # casos numéricos (segundos)
+    # Numérico (segundos)
     s_num = pd.to_numeric(s_str.where(~has_colon, None), errors="coerce")
     out.loc[~has_colon] = s_num / 3600.0
-
     return out
 
+# ======================
+# Mapeamento de arquivos
+# ======================
+# Palavras-chave para identificar cada arquivo (em qualquer parte do nome)
+KEYS = {
+    "csat": ["data_product__csat"],
+    "media_csat": ["data_product__media_csat", "media_csat"],
+    "tma_por_canal": ["tempo_medio_de_atendimento_por_canal"],
+    "tma_geral": ["tempo_medio_de_atendimento"],
+    "tme_geral": ["tempo_medio_de_espera"],
+    "total_atendimentos": ["total_de_atendimentos"],
+    "total_atendimentos_conc": ["total_de_atendimentos_concluidos", "total_de_atendimentos_concluídos"],
+}
+
+def detect_kind(filename: str) -> Optional[str]:
+    low = filename.lower()
+    for kind, tokens in KEYS.items():
+        for t in tokens:
+            if t in low and low.endswith(".xlsx"):
+                return kind
+    return None
+
+def extract_month_from_name(name: str) -> Optional[str]:
+    # pega a primeira ocorrência de AAAA-MM
+    m = re.search(r"\d{4}-\d{2}", name)
+    return m.group(0) if m else None
+
+# ======================
+# Build payloads
+# ======================
 def build_by_channel(payload: dict) -> dict:
-    """Monta/atualiza payload['by_channel'] a partir de TMA, média CSAT e contagem."""
-    df_tma   = payload.get("tma_por_canal")
-    df_media = payload.get("media_csat")
-    df_csat  = payload.get("csat")
+    """Monta/atualiza payload['by_channel'] unificando qualquer DF com coluna 'Canal'."""
+    dfs = []
+    for k, df in payload.items():
+        if isinstance(df, pd.DataFrame) and "Canal" in normalize_canal_column(df).columns:
+            dfs.append(normalize_canal_column(df.copy()))
 
-    if isinstance(df_tma, pd.DataFrame) and not df_tma.empty:
-        df_tma = normalize_canal_column(df_tma.copy())
-    else:
-        df_tma = None
+    merged = None
+    for df in dfs:
+        merged = df.copy() if merged is None else merged.merge(df, on="Canal", how="outer")
 
-    if isinstance(df_media, pd.DataFrame) and not df_media.empty:
-        df_media = normalize_canal_column(df_media.copy())
-        # normaliza nome da média
-        mcol = find_best_column(df_media, ["Média CSAT","media csat","avg","media"])
+    # Deriva 'Média CSAT' padronizada se existir 'avg'/'media' etc.
+    if isinstance(merged, pd.DataFrame):
+        mcol = find_best_column(merged, ["Média CSAT","media csat","avg","media"])
         if mcol and mcol != "Média CSAT":
-            df_media = df_media.rename(columns={mcol: "Média CSAT"})
-    else:
-        df_media = None
-
-    # Deriva contagem de respostas a partir do csat (se existir)
-    csat_counts = None
-    if isinstance(df_csat, pd.DataFrame) and not df_csat.empty:
-        df_csat = normalize_canal_column(df_csat.copy())
-        ccol = find_best_column(df_csat, [
+            merged = merged.rename(columns={mcol: "Média CSAT"})
+        # Se houverem contagens com nomes diferentes, tenta padronizar
+        ccol = find_best_column(merged, [
             "Respostas CSAT","Quantidade de respostas CSAT","score_total","ratings",
             "Total de avaliações","avaliacoes","avaliações","qtd","qtde"
         ])
-        if ccol:
-            csat_counts = df_csat.groupby("Canal", as_index=False)[ccol].sum().rename(columns={ccol:"Respostas CSAT"})
-
-    merged = None
-    for df in [df_tma, df_media, csat_counts]:
-        if isinstance(df, pd.DataFrame):
-            merged = df.copy() if merged is None else merged.merge(df, on="Canal", how="outer")
-
-    if isinstance(merged, pd.DataFrame):
+        if ccol and ccol != "Respostas CSAT":
+            merged = merged.rename(columns={ccol: "Respostas CSAT"})
         payload["by_channel"] = merged
 
     return payload
 
-# =========================
-# Streamlit UI
-# =========================
-st.set_page_config(page_title="Dashboard CSAT Mensal (XLSX) — Persistência GitHub", layout="wide")
-st.title("Dashboard CSAT Mensal (XLSX) — Persistência GitHub")
-st.caption("Arquivos por mês ficam salvos no repositório GitHub configurado e em `data_store/` como fallback.")
+# ======================
+# GitHub fetch
+# ======================
+def gh_headers() -> Dict[str, str]:
+    h = {"Accept": "application/vnd.github+json"}
+    if GH_TOKEN:
+        h["Authorization"] = f"token {GH_TOKEN}"
+    return h
+
+def gh_list_contents(path: str) -> List[dict]:
+    url = f"{GH_API_BASE}/repos/{GH_REPO}/contents/{path}?ref={GH_BRANCH}"
+    r = requests.get(url, headers=gh_headers(), timeout=30)
+    if r.status_code != 200:
+        return []
+    data = r.json()
+    return data if isinstance(data, list) else []
+
+def gh_download_bytes(download_url: str) -> Optional[bytes]:
+    r = requests.get(download_url, headers=gh_headers(), timeout=60)
+    return r.content if r.status_code == 200 else None
+
+def group_repo_files_by_month() -> Dict[str, List[dict]]:
+    """
+    Pesquisa GH_PATH e agrupa arquivos por mês (YYYY-MM), aceitando:
+      - data/YYYY-MM/<arquivos>.xlsx
+      - data/<arquivos_com_YYYY-MM_no_nome>.xlsx
+    """
+    out: Dict[str, List[dict]] = {}
+    # 1) lista raiz GH_PATH
+    root_items = gh_list_contents(GH_PATH)
+    for it in root_items:
+        t = it.get("type")
+        name = it.get("name","")
+        if t == "dir":
+            # subpasta; se for YYYY-MM, usa os .xlsx de dentro
+            if re.fullmatch(r"\d{4}-\d{2}", name):
+                month = name
+                for sub in gh_list_contents(f"{GH_PATH}/{name}"):
+                    if sub.get("type") == "file" and sub.get("name","").lower().endswith(".xlsx"):
+                        out.setdefault(month, []).append(sub)
+            else:
+                # pasta livre; se tiver .xlsx com mês no nome, captura
+                for sub in gh_list_contents(f"{GH_PATH}/{name}"):
+                    if sub.get("type") == "file" and sub.get("name","").lower().endswith(".xlsx"):
+                        m = extract_month_from_name(sub.get("name",""))
+                        if m:
+                            out.setdefault(m, []).append(sub)
+        elif t == "file" and name.lower().endswith(".xlsx"):
+            m = extract_month_from_name(name)
+            if m:
+                out.setdefault(m, []).append(it)
+    return out
+
+def gh_read_month_payload_from_items(items: List[dict]) -> dict:
+    payload: dict = {}
+    # seleciona o arquivo mais "recente" por tipo (heurística: nome mais longo/lexicograficamente maior)
+    by_kind: Dict[str, List[dict]] = {}
+    for it in items:
+        k = detect_kind(it.get("name",""))
+        if k:
+            by_kind.setdefault(k, []).append(it)
+    for kind, lst in by_kind.items():
+        # pega o último por nome (geralmente tem timestamp mais à direita)
+        sel = sorted(lst, key=lambda x: x.get("name",""))[-1]
+        b = gh_download_bytes(sel.get("download_url",""))
+        if b:
+            df = load_xlsx_from_bytes(b)
+            payload[kind] = df
+    return build_by_channel(payload)
+
+def load_all_github_months_into_state(force: bool = False) -> int:
+    grouped = group_repo_files_by_month()
+    loaded = 0
+    for m, items in sorted(grouped.items()):
+        if not force and m in st.session_state["months"]:
+            continue
+        payload = gh_read_month_payload_from_items(items)
+        if payload:
+            st.session_state["months"][m] = payload
+            loaded += 1
+    return loaded
+
+# ======================
+# Local (fallback)
+# ======================
+def read_local_month_payload(y: int, m: int) -> dict:
+    mk = f"{y:04d}-{m:02d}"
+    folder = os.path.join(LOCAL_STORE_DIR, mk)
+    payload: dict = {}
+    if not os.path.isdir(folder):
+        return payload
+    for f in os.listdir(folder):
+        if not f.lower().endswith(".xlsx"):
+            continue
+        kind = detect_kind(f)
+        if not kind:
+            continue
+        try:
+            df = load_xlsx(os.path.join(folder, f))
+            payload[kind] = df
+        except Exception:
+            pass
+    return build_by_channel(payload)
+
+def load_all_local_months_into_state() -> int:
+    if not os.path.isdir(LOCAL_STORE_DIR):
+        return 0
+    loaded = 0
+    for name in sorted(os.listdir(LOCAL_STORE_DIR)):
+        p = os.path.join(LOCAL_STORE_DIR, name)
+        if os.path.isdir(p) and re.fullmatch(r"\d{4}-\d{2}", name):
+            y, m = map(int, name.split("-"))
+            payload = read_local_month_payload(y, m)
+            if payload and name not in st.session_state["months"]:
+                st.session_state["months"][name] = payload
+                loaded += 1
+    return loaded
+
+# ======================
+# Upload mensal (multi-arquivos)
+# ======================
+def ingest_uploaded_files(files: List) -> Dict[str, pd.DataFrame]:
+    """Recebe múltiplos uploads e retorna payload parcial (por tipo)."""
+    payload: Dict[str, pd.DataFrame] = {}
+    for fl in files:
+        name = fl.name
+        kind = detect_kind(name)
+        if not kind:
+            continue
+        try:
+            df = load_xlsx(fl)
+            payload[kind] = df
+        except Exception:
+            pass
+    return payload
+
+# ======================
+# Streamlit App
+# ======================
+st.set_page_config(page_title="Dashboard CSAT — GitHub + Upload", layout="wide")
+st.title("Dashboard CSAT (XLSX) — Fonte GitHub + Upload mensal")
+st.caption(f"Fonte GitHub padrão: **{GH_REPO} / {GH_BRANCH} / {GH_PATH}**. Aceita uploads com nomes contendo palavras-chave e timestamps.")
 
 # Estado
 if "months" not in st.session_state:
     st.session_state["months"] = {}
+
+# Carrega do GitHub na inicialização
+_gh_loaded = load_all_github_months_into_state(force=False)
+_local_loaded = load_all_local_months_into_state()
 
 # Sidebar
 with st.sidebar:
@@ -212,61 +318,52 @@ with st.sidebar:
     mk = month_key(int(year), int(month))
 
     st.write("---")
-    save_local  = st.checkbox("Salvar em disco (fallback local)", value=True)
-    save_github = st.checkbox("Salvar no GitHub (persistência durável)", value=False)
+    st.markdown("**Fonte dos dados**")
+    st.write(f"GitHub: `{GH_REPO}` / `{GH_BRANCH}` / `{GH_PATH}`")
+    if GH_TOKEN:
+        st.success("Token GitHub detectado.")
+    else:
+        st.info("Sem token GitHub: usando requisições públicas.")
+
+    if st.button("Recarregar do GitHub (todos os meses)"):
+        loaded = load_all_github_months_into_state(force=True)
+        st.success(f"Recarregados do GitHub: {loaded} mês(es).")
 
     st.write("---")
-    st.subheader("Upload dos arquivos (.xlsx)")
-    st.caption('Cada arquivo deve conter a aba "Resultado da consulta".')
+    st.subheader("Upload mensal (.xlsx)")
+    st.caption("Solte **todos** os arquivos do mês (ex.: data_product__*, tempo_medio_*, total_*).")
+    ups = st.file_uploader("Arraste/Selecione os arquivos", type=["xlsx"], accept_multiple_files=True)
+    if ups:
+        st.caption("Opcional: informe o **mês** desses arquivos (YYYY-MM). Se não informar, uso o mês atual.")
+        up_month = st.text_input("Mês destino (YYYY-MM)", value=mk)
 
-    up_csat  = st.file_uploader("data_product__csat*.xlsx (Categoria, score_total)", type=["xlsx"], key="up1")
-    up_media = st.file_uploader("data_product__media_csat*.xlsx (avg)", type=["xlsx"], key="up2")
-    up_tma   = st.file_uploader("tempo_medio_de_atendimento_*.xlsx (mean_total HH:MM:SS)", type=["xlsx"], key="up3")
-
-    if st.button("Carregar e salvar este mês"):
-        payload = st.session_state["months"].get(mk, {}).copy()
-        if up_csat is not None:  payload["csat"] = load_xlsx(up_csat)
-        if up_media is not None: payload["media_csat"] = load_xlsx(up_media)
-        if up_tma is not None:   payload["tma_por_canal"] = load_xlsx(up_tma)
-
-        payload = build_by_channel(payload)
-        write_local_month_payload(int(year), int(month), payload, {"save_local": save_local, "save_github": save_github})
-        st.session_state["months"][mk] = payload
-        st.success(f"Arquivos do mês {mk} carregados e armazenados.")
-
-    if st.button("Recarregar do disco este mês"):
-        payload = read_local_month_payload(int(year), int(month))
-        if payload:
-            st.session_state["months"][mk] = payload
-            st.success(f"Mês {mk} recarregado do disco.")
-        else:
-            st.info("Nada encontrado no disco para este mês.")
-
-# Carrega todos os meses do disco (se existirem) ao iniciar
-def load_all_local_months_into_state():
-    if not os.path.isdir(LOCAL_STORE_DIR):
-        return
-    for name in sorted(os.listdir(LOCAL_STORE_DIR)):
-        p = os.path.join(LOCAL_STORE_DIR, name)
-        if os.path.isdir(p) and len(name) == 7 and name[4] == "-":
-            try:
-                y, m = map(int, name.split("-"))
-                payload = read_local_month_payload(y, m)
-                if payload and name not in st.session_state["months"]:
-                    st.session_state["months"][name] = payload
-            except Exception:
-                pass
-load_all_local_months_into_state()
+        if st.button("Carregar arquivos enviados neste mês"):
+            partial = ingest_uploaded_files(ups)
+            if not partial:
+                st.warning("Não reconheci nenhum arquivo pelos nomes. Verifique se os nomes contêm as palavras-chave.")
+            else:
+                payload = st.session_state["months"].get(up_month, {})
+                payload.update(partial)
+                payload = build_by_channel(payload)
+                st.session_state["months"][up_month] = payload
+                # salva local
+                folder = os.path.join(LOCAL_STORE_DIR, up_month)
+                ensure_dir(folder)
+                for kind, df in partial.items():
+                    fname = f"{kind}.xlsx"
+                    df.to_excel(os.path.join(folder, fname), index=False)
+                st.success(f"{len(partial)} arquivo(s) anexado(s) ao mês {up_month} e salvo(s) em disco.")
 
 # Helper
-def get_current_by_channel() -> pd.DataFrame | None:
+def get_current_by_channel() -> Optional[pd.DataFrame]:
     payload = st.session_state["months"].get(mk, {})
     df = payload.get("by_channel")
     if isinstance(df, pd.DataFrame) and not df.empty:
         return df.copy()
+    # fallback: primeiro DF com coluna 'Canal'
     for v in payload.values():
-        if isinstance(v, pd.DataFrame) and "Canal" in v.columns:
-            return v.copy()
+        if isinstance(v, pd.DataFrame) and "Canal" in normalize_canal_column(v).columns:
+            return normalize_canal_column(v.copy())
     return None
 
 # Abas
@@ -277,11 +374,33 @@ with tabs[0]:
     st.subheader(f"Visão Geral — {mk}")
     if st.session_state["months"]:
         st.write(f"Meses carregados: `{', '.join(sorted(st.session_state['months'].keys()))}`")
-    dfc = get_current_by_channel()
-    if dfc is None:
-        st.info("Carregue os arquivos do mês no menu lateral para visualizar os painéis.")
+    payload = st.session_state["months"].get(mk, {})
+    if not payload:
+        st.info("Selecione um mês com dados carregados (GitHub ou Upload).")
     else:
-        st.dataframe(dfc.head(50), use_container_width=True)
+        cols = st.columns(3)
+        with cols[0]:
+            df = payload.get("total_atendimentos")
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                st.metric("Total de Atendimentos (arquivo)", int(pd.to_numeric(df.select_dtypes(include=[np.number]), errors="coerce").sum().sum()))
+        with cols[1]:
+            df = payload.get("total_atendimentos_conc")
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                st.metric("Atendimentos Concluídos (arquivo)", int(pd.to_numeric(df.select_dtypes(include=[np.number]), errors="coerce").sum().sum()))
+        with cols[2]:
+            df = payload.get("tma_geral")
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                # tenta uma coluna de tempo
+                tcol = find_best_column(df, ["mean_total HH:MM:SS","mean_total","Tempo médio de atendimento","tempo medio de atendimento"])
+                if tcol:
+                    v = to_hours_strict(df[tcol]).mean()
+                    st.metric("Tempo médio de atendimento (h) — geral", f"{v:.2f}")
+
+        st.write("### Tabelas disponíveis no mês")
+        for k, v in payload.items():
+            if isinstance(v, pd.DataFrame):
+                st.markdown(f"**{k}**")
+                st.dataframe(v.head(50), use_container_width=True)
 
 # 2) Por Canal
 with tabs[1]:
@@ -294,7 +413,7 @@ with tabs[1]:
 
         col3, col4 = st.columns(2)
 
-        # ---- Tempo médio de atendimento (HORAS) — CONVERSÃO ESTRITA ----
+        # Tempo médio de atendimento (horas) — ESTRITO
         with col3:
             cand_tma = [
                 "mean_total HH:MM:SS","mean_total","Tempo médio de atendimento",
@@ -308,14 +427,11 @@ with tabs[1]:
                 dft = dfc.copy()
                 dft["Tempo médio de atendimento (horas)"] = to_hours_strict(dft[tcol])
                 st.plotly_chart(
-                    px.bar(
-                        dft, x="Canal", y="Tempo médio de atendimento (horas)",
-                        title="Tempo médio de atendimento (horas)"
-                    ),
+                    px.bar(dft, x="Canal", y="Tempo médio de atendimento (horas)", title="Tempo médio de atendimento (horas)"),
                     use_container_width=True
                 )
 
-        # ---- Tempo médio de espera (HORAS) — mesma regra ----
+        # Tempo médio de espera (horas) — ESTRITO (se existir por canal)
         with col4:
             cand_wait = [
                 "mean_wait HH:MM:SS","mean_wait","Tempo médio de espera",
@@ -324,15 +440,12 @@ with tabs[1]:
             ]
             wcol = find_best_column(dfc, cand_wait)
             if wcol is None:
-                st.info("Coluna de tempo de espera não encontrada para este mês.")
+                st.info("Coluna de tempo de espera por canal não localizada neste mês.")
             else:
                 dfw = dfc.copy()
                 dfw["Tempo médio de espera (horas)"] = to_hours_strict(dfw[wcol])
                 st.plotly_chart(
-                    px.bar(
-                        dfw, x="Canal", y="Tempo médio de espera (horas)",
-                        title="Tempo médio de espera (horas)"
-                    ),
+                    px.bar(dfw, x="Canal", y="Tempo médio de espera (horas)", title="Tempo médio de espera (horas)"),
                     use_container_width=True
                 )
 
@@ -376,7 +489,7 @@ with tabs[3]:
 # 5) Análise dos Canais
 with tabs[4]:
     st.subheader("Análise dos Canais")
-    st.caption("Exibe, por mês, os canais com MENOR quantidade de respostas do CSAT (se disponível) e as MENORES notas de CSAT.")
+    st.caption("Exibe, por mês, os canais com MENOR quantidade de respostas de CSAT (se disponível) e as MENORES notas de CSAT.")
 
     months_dict = st.session_state["months"]
     if not months_dict:
@@ -395,8 +508,8 @@ with tabs[4]:
             df = payload.get("by_channel")
             if not isinstance(df, pd.DataFrame) or df.empty:
                 for v in payload.values():
-                    if isinstance(v, pd.DataFrame) and "Canal" in v.columns:
-                        df = v
+                    if isinstance(v, pd.DataFrame) and "Canal" in normalize_canal_column(v).columns:
+                        df = normalize_canal_column(v)
                         break
             if not isinstance(df, pd.DataFrame) or df.empty:
                 continue
@@ -436,7 +549,7 @@ with tabs[4]:
             st.markdown("**Menor quantidade de respostas do CSAT por mês**")
             n_counts = st.number_input("Quantos canais exibir (menores quantidades)?", 1, 10, 3, 1, key="n_counts")
             if not rec_counts:
-                st.warning("Não encontrei uma coluna de contagem de respostas por canal nos dados persistidos.")
+                st.warning("Não encontrei coluna de contagem de respostas por canal nos dados persistidos.")
             else:
                 dd = pd.concat(rec_counts, ignore_index=True)
                 tops = [g.sort_values("Respostas CSAT", ascending=True).head(int(n_counts)) for _, g in dd.groupby("mes", as_index=False)]
