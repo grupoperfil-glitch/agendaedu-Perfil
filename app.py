@@ -1,23 +1,14 @@
 # app.py — Dashboard CSAT Mensal (XLSX) — Persistência GitHub/Local
 # ---------------------------------------------------------------
 # Requisitos:
-#   pip install streamlit plotly pandas numpy openpyxl
-#   (Opcional GitHub) configurar variáveis de ambiente:
-#     GITHUB_TOKEN, GITHUB_REPO (ex.: "org/repo"), GITHUB_PATH (ex.: "data_store")
-#
-# Estrutura de pastas local:
-#   data_store/
-#     2025-09/
-#       data_product__csat.xlsx
-#       data_product__media_csat.xlsx
-#       tempo_medio_de_atendimento.xlsx
+#   pip install streamlit plotly pandas numpy openpyxl requests
 #
 # Abas:
 #   1) Visão Geral
-#   2) Por Canal  ---> CONVERSÃO ROBUSTA para horas no gráfico "Tempo médio de atendimento (h)"
+#   2) Por Canal  ---> CONVERSÃO ESTRITA p/ horas em "Tempo médio de atendimento (horas)"
 #   3) Comparativo Mensal
 #   4) Dicionário de Dados
-#   5) Análise dos Canais  ---> lê do mesmo store (session_state e data_store)
+#   5) Análise dos Canais
 
 from __future__ import annotations
 import os
@@ -31,10 +22,9 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-# --------------------------
-# Utilidades de persistência
-# --------------------------
-
+# =========================
+# Persistência (local/GitHub)
+# =========================
 LOCAL_STORE_DIR = "data_store"
 
 def ensure_dir(p: str) -> None:
@@ -43,220 +33,177 @@ def ensure_dir(p: str) -> None:
 def month_key(y: int, m: int) -> str:
     return f"{y:04d}-{m:02d}"
 
-def save_df_local(df: pd.DataFrame, path: str) -> None:
-    ensure_dir(os.path.dirname(path))
-    # Salva como .xlsx
-    try:
-        df.to_excel(path, index=False)
-    except Exception:
-        # Fallback CSV
-        df.to_csv(path.replace(".xlsx", ".csv"), index=False, encoding="utf-8-sig")
-
 def load_xlsx(file: BytesIO | str) -> pd.DataFrame:
-    """Carrega Excel. Tenta ler a aba 'Resultado da consulta' e, se não existir, pega a primeira."""
+    """Carrega Excel. Tenta 'Resultado da consulta', senão 1ª aba."""
     try:
         xl = pd.ExcelFile(file)
         sheet = "Resultado da consulta" if "Resultado da consulta" in xl.sheet_names else xl.sheet_names[0]
         return xl.parse(sheet)
     except Exception:
-        # Fallback: tenta ler direto
         return pd.read_excel(file)
 
 def read_local_month_payload(y: int, m: int) -> dict:
-    """Lê arquivos do mês (se existirem) da pasta local e retorna payload padronizado."""
     mk = month_key(y, m)
     folder = os.path.join(LOCAL_STORE_DIR, mk)
     payload = {}
     if not os.path.isdir(folder):
         return payload
 
-    def try_read(fname_patterns: list[str]) -> pd.DataFrame | None:
+    def try_read(startswith_list: list[str]) -> pd.DataFrame | None:
         for f in os.listdir(folder):
             low = f.lower()
-            if any(low.startswith(p) and low.endswith(".xlsx") for p in fname_patterns):
+            if any(low.startswith(p) and low.endswith(".xlsx") for p in startswith_list):
                 try:
                     return load_xlsx(os.path.join(folder, f))
                 except Exception:
                     pass
         return None
 
-    df_csat = try_read(["data_product__csat"])
+    df_csat  = try_read(["data_product__csat"])
     df_media = try_read(["data_product__media_csat"])
-    df_tma = try_read(["tempo_medio_de_atendimento", "tempo_medio_atendimento", "tma"])
+    df_tma   = try_read(["tempo_medio_de_atendimento", "tempo_medio_atendimento", "tma"])
 
-    if df_csat is not None:       payload["csat"] = df_csat
-    if df_media is not None:      payload["media_csat"] = df_media
-    if df_tma is not None:        payload["tma_por_canal"] = df_tma
+    if df_csat  is not None: payload["csat"] = df_csat
+    if df_media is not None: payload["media_csat"] = df_media
+    if df_tma   is not None: payload["tma_por_canal"] = df_tma
 
-    # Monta derivado por canal (merge) se possível
     payload = build_by_channel(payload)
-
     return payload
+
+def save_df_local(df: pd.DataFrame, path: str) -> None:
+    ensure_dir(os.path.dirname(path))
+    df.to_excel(path, index=False)
 
 def write_local_month_payload(y: int, m: int, payload: dict, save_flags: dict):
     mk = month_key(y, m)
     folder = os.path.join(LOCAL_STORE_DIR, mk)
     ensure_dir(folder)
 
-    if "csat" in payload and save_flags.get("save_local"):
-        save_df_local(payload["csat"], os.path.join(folder, "data_product__csat.xlsx"))
-    if "media_csat" in payload and save_flags.get("save_local"):
-        save_df_local(payload["media_csat"], os.path.join(folder, "data_product__media_csat.xlsx"))
-    if "tma_por_canal" in payload and save_flags.get("save_local"):
-        save_df_local(payload["tma_por_canal"], os.path.join(folder, "tempo_medio_de_atendimento.xlsx"))
+    if save_flags.get("save_local", True):
+        if "csat" in payload:        save_df_local(payload["csat"], os.path.join(folder, "data_product__csat.xlsx"))
+        if "media_csat" in payload:  save_df_local(payload["media_csat"], os.path.join(folder, "data_product__media_csat.xlsx"))
+        if "tma_por_canal" in payload: save_df_local(payload["tma_por_canal"], os.path.join(folder, "tempo_medio_de_atendimento.xlsx"))
 
-    # (Opcional) GitHub: se variáveis de ambiente estiverem definidas, envia base64 por API HTTP simples
     if save_flags.get("save_github"):
         gh_token = os.getenv("GITHUB_TOKEN")
-        gh_repo  = os.getenv("GITHUB_REPO")  # "org/repo"
+        gh_repo  = os.getenv("GITHUB_REPO")  # ex.: "org/repo"
         gh_path  = os.getenv("GITHUB_PATH", "data_store").strip("/")
-
         if gh_token and gh_repo:
-            # Usa API HTTP "contents" (sem depender de PyGithub)
             import requests
             base_url = f"https://api.github.com/repos/{gh_repo}/contents"
+            branch = os.getenv("GITHUB_BRANCH", "main")
+
             def push_df(df: pd.DataFrame, relname: str):
                 path = f"{gh_path}/{mk}/{relname}"
-                ensure_dir(os.path.dirname(os.path.join(LOCAL_STORE_DIR, mk)))
-                # Salva temporário local em XLSX para gerar bytes
                 buf = BytesIO()
                 df.to_excel(buf, index=False)
                 content_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-
-                # Checa se já existe (para obter sha)
+                # get sha (if exists)
                 r = requests.get(f"{base_url}/{path}", headers={"Authorization": f"token {gh_token}"})
                 sha = r.json().get("sha") if r.status_code == 200 else None
-
-                put_body = {
-                    "message": f"update {path}",
-                    "content": content_b64,
-                    "branch": os.getenv("GITHUB_BRANCH", "main")
-                }
-                if sha:
-                    put_body["sha"] = sha
-                r2 = requests.put(f"{base_url}/{path}", headers={"Authorization": f"token {gh_token}"}, data=json.dumps(put_body))
+                body = {"message": f"update {path}", "content": content_b64, "branch": branch}
+                if sha: body["sha"] = sha
+                r2 = requests.put(f"{base_url}/{path}", headers={"Authorization": f"token {gh_token}"}, data=json.dumps(body))
                 if r2.status_code not in (200, 201):
-                    st.warning(f"Falha ao enviar {relname} ao GitHub: {r2.status_code} - {r2.text[:180]}")
+                    st.warning(f"Falha ao enviar {relname} ao GitHub ({r2.status_code}).")
 
             if "csat" in payload:        push_df(payload["csat"], "data_product__csat.xlsx")
             if "media_csat" in payload:  push_df(payload["media_csat"], "data_product__media_csat.xlsx")
             if "tma_por_canal" in payload: push_df(payload["tma_por_canal"], "tempo_medio_de_atendimento.xlsx")
         else:
-            st.info("Persistência GitHub não configurada (defina GITHUB_TOKEN e GITHUB_REPO). Usando apenas armazenamento local.")
+            st.info("Persistência GitHub não configurada (defina GITHUB_TOKEN e GITHUB_REPO).")
 
-# ---------------------------------------
-# Normalização e utilidades de DataFrame
-# ---------------------------------------
-
+# =========================
+# Funções de dados
+# =========================
 def normalize_canal_column(df: pd.DataFrame) -> pd.DataFrame:
-    """Garante coluna 'Canal'. Se achar 'Categoria', 'canal', 'Channel', etc., renomeia."""
     if "Canal" in df.columns:
         return df
-    cand = {
-        "categoria": "Canal",
-        "canal": "Canal",
-        "channel": "Canal",
-        "categoria/canal": "Canal"
-    }
     lower = {str(c).strip().lower(): c for c in df.columns}
-    for k, new in cand.items():
-        if k in lower:
-            return df.rename(columns={lower[k]: new})
+    for alias in ["categoria", "canal", "channel", "categoria/canal"]:
+        if alias in lower:
+            return df.rename(columns={lower[alias]: "Canal"})
     return df
-
-def serie_para_horas(serie: pd.Series) -> pd.Series:
-    """Converte uma série que pode estar em HH:MM:SS, segundos, minutos ou horas -> HORAS."""
-    # Tenta numérico
-    s_num = pd.to_numeric(serie, errors="coerce")
-    if s_num.notna().any():
-        vmax = float(s_num.max())
-        vmed = float(s_num.median()) if s_num.notna().any() else vmax
-        if vmax > 300:    # segundos (maior que 5min em segundos)
-            return s_num / 3600.0
-        if 5 <= vmed <= 180:  # minutos
-            return s_num / 60.0
-        return s_num.astype(float)      # horas
-    # Tenta HH:MM:SS
-    td = pd.to_timedelta(serie.astype(str), errors="coerce")
-    if td.notna().any():
-        return td.dt.total_seconds() / 3600.0
-    # Falhou
-    return pd.Series([np.nan] * len(serie), index=serie.index)
 
 def find_best_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
     lower = {str(c).strip().lower(): c for c in df.columns}
     for c in candidates:
-        k = c.strip().lower()
-        if k in lower:
-            return lower[k]
+        if c.strip().lower() in lower:
+            return lower[c.strip().lower()]
     return None
 
-def build_by_channel(payload: dict) -> dict:
-    """Cria/atualiza payload['by_channel'] unificando:
-       - tma_por_canal (tempo médio)
-       - media_csat (média de CSAT)
-       - csat (usado para contar respostas por canal, se houver)
+def to_hours_strict(series: pd.Series) -> pd.Series:
+    """Conversão ESTRITA:
+       - valores com ':' -> HH:MM:SS -> horas
+       - valores numéricos -> SEMPRE segundos -> horas
     """
+    s_str = series.astype(str)
+    has_colon = s_str.str.contains(":")
+    out = pd.Series(index=series.index, dtype="float64")
+
+    # casos HH:MM:SS
+    td = pd.to_timedelta(s_str.where(has_colon, None), errors="coerce")
+    out.loc[has_colon] = td.dt.total_seconds() / 3600.0
+
+    # casos numéricos (segundos)
+    s_num = pd.to_numeric(s_str.where(~has_colon, None), errors="coerce")
+    out.loc[~has_colon] = s_num / 3600.0
+
+    return out
+
+def build_by_channel(payload: dict) -> dict:
+    """Monta/atualiza payload['by_channel'] a partir de TMA, média CSAT e contagem."""
     df_tma   = payload.get("tma_por_canal")
     df_media = payload.get("media_csat")
     df_csat  = payload.get("csat")
 
-    df_tma2, df_media2, df_csat2 = None, None, None
-
     if isinstance(df_tma, pd.DataFrame) and not df_tma.empty:
-        df_tma2 = normalize_canal_column(df_tma.copy())
+        df_tma = normalize_canal_column(df_tma.copy())
+    else:
+        df_tma = None
+
     if isinstance(df_media, pd.DataFrame) and not df_media.empty:
-        df_media2 = normalize_canal_column(df_media.copy())
-    if isinstance(df_csat, pd.DataFrame) and not df_csat.empty:
-        df_csat2 = normalize_canal_column(df_csat.copy())
-
-    # Deriva contagem de respostas no df_csat, caso tenha algo como score_total/ratings
-    if df_csat2 is not None:
-        count_col = find_best_column(df_csat2, [
-            "Respostas CSAT","Quantidade de respostas CSAT","score_total","ratings",
-            "total de avaliações","avaliacoes","avaliações","qtd","qtde"
-        ])
-        if count_col is not None:
-            grp = df_csat2.groupby("Canal", as_index=False)[count_col].sum()
-            grp = grp.rename(columns={count_col: "Respostas CSAT"})
-            payload["csat_respostas_por_canal"] = grp
-
-    # Renomeia média CSAT se vier com outro nome (ex.: 'avg')
-    if df_media2 is not None:
-        mcol = find_best_column(df_media2, ["Média CSAT","media csat","avg","media"])
+        df_media = normalize_canal_column(df_media.copy())
+        # normaliza nome da média
+        mcol = find_best_column(df_media, ["Média CSAT","media csat","avg","media"])
         if mcol and mcol != "Média CSAT":
-            df_media2 = df_media2.rename(columns={mcol: "Média CSAT"})
+            df_media = df_media.rename(columns={mcol: "Média CSAT"})
+    else:
+        df_media = None
 
-    # Prepara join por 'Canal'
+    # Deriva contagem de respostas a partir do csat (se existir)
+    csat_counts = None
+    if isinstance(df_csat, pd.DataFrame) and not df_csat.empty:
+        df_csat = normalize_canal_column(df_csat.copy())
+        ccol = find_best_column(df_csat, [
+            "Respostas CSAT","Quantidade de respostas CSAT","score_total","ratings",
+            "Total de avaliações","avaliacoes","avaliações","qtd","qtde"
+        ])
+        if ccol:
+            csat_counts = df_csat.groupby("Canal", as_index=False)[ccol].sum().rename(columns={ccol:"Respostas CSAT"})
+
     merged = None
-    if df_tma2 is not None:
-        merged = df_tma2.copy()
-    if df_media2 is not None:
-        merged = df_media2.copy() if merged is None else merged.merge(df_media2, on="Canal", how="outer")
-    if payload.get("csat_respostas_por_canal") is not None:
-        merged = payload["csat_respostas_por_canal"].copy() if merged is None else merged.merge(payload["csat_respostas_por_canal"], on="Canal", how="outer")
+    for df in [df_tma, df_media, csat_counts]:
+        if isinstance(df, pd.DataFrame):
+            merged = df.copy() if merged is None else merged.merge(df, on="Canal", how="outer")
 
-    if merged is not None:
+    if isinstance(merged, pd.DataFrame):
         payload["by_channel"] = merged
 
     return payload
 
-# -------------------
-# Configuração Streamlit
-# -------------------
-
+# =========================
+# Streamlit UI
+# =========================
 st.set_page_config(page_title="Dashboard CSAT Mensal (XLSX) — Persistência GitHub", layout="wide")
-
 st.title("Dashboard CSAT Mensal (XLSX) — Persistência GitHub")
 st.caption("Arquivos por mês ficam salvos no repositório GitHub configurado e em `data_store/` como fallback.")
 
-# Estado dos meses
+# Estado
 if "months" not in st.session_state:
     st.session_state["months"] = {}
 
-# -------------------
-# Sidebar - parâmetros e upload
-# -------------------
+# Sidebar
 with st.sidebar:
     st.header("Parâmetros do Mês")
     today = date.today()
@@ -278,25 +225,15 @@ with st.sidebar:
 
     if st.button("Carregar e salvar este mês"):
         payload = st.session_state["months"].get(mk, {}).copy()
+        if up_csat is not None:  payload["csat"] = load_xlsx(up_csat)
+        if up_media is not None: payload["media_csat"] = load_xlsx(up_media)
+        if up_tma is not None:   payload["tma_por_canal"] = load_xlsx(up_tma)
 
-        if up_csat is not None:
-            payload["csat"] = load_xlsx(up_csat)
-        if up_media is not None:
-            payload["media_csat"] = load_xlsx(up_media)
-        if up_tma is not None:
-            payload["tma_por_canal"] = load_xlsx(up_tma)
-
-        # Monta by_channel
         payload = build_by_channel(payload)
-
-        # Grava local/GitHub se marcado
         write_local_month_payload(int(year), int(month), payload, {"save_local": save_local, "save_github": save_github})
-
-        # Atualiza estado
         st.session_state["months"][mk] = payload
         st.success(f"Arquivos do mês {mk} carregados e armazenados.")
 
-    # Carrega do disco o mês atual, caso exista
     if st.button("Recarregar do disco este mês"):
         payload = read_local_month_payload(int(year), int(month))
         if payload:
@@ -305,41 +242,34 @@ with st.sidebar:
         else:
             st.info("Nada encontrado no disco para este mês.")
 
-# Carrega todos os meses do disco para o estado (sem sobrescrever os já carregados manualmente)
+# Carrega todos os meses do disco (se existirem) ao iniciar
 def load_all_local_months_into_state():
     if not os.path.isdir(LOCAL_STORE_DIR):
         return
     for name in sorted(os.listdir(LOCAL_STORE_DIR)):
         p = os.path.join(LOCAL_STORE_DIR, name)
         if os.path.isdir(p) and len(name) == 7 and name[4] == "-":
-            y, m = name.split("-")
             try:
-                y = int(y); m = int(m)
+                y, m = map(int, name.split("-"))
                 payload = read_local_month_payload(y, m)
                 if payload and name not in st.session_state["months"]:
                     st.session_state["months"][name] = payload
             except Exception:
                 pass
-
 load_all_local_months_into_state()
 
-# -------------------
-# Helper para pegar DF por canal do mês selecionado
-# -------------------
+# Helper
 def get_current_by_channel() -> pd.DataFrame | None:
     payload = st.session_state["months"].get(mk, {})
     df = payload.get("by_channel")
     if isinstance(df, pd.DataFrame) and not df.empty:
         return df.copy()
-    # tenta alguma tabela com coluna "Canal"
     for v in payload.values():
         if isinstance(v, pd.DataFrame) and "Canal" in v.columns:
             return v.copy()
     return None
 
-# -------------------
 # Abas
-# -------------------
 tabs = st.tabs(["Visão Geral", "Por Canal", "Comparativo Mensal", "Dicionário de Dados", "Análise dos Canais"])
 
 # 1) Visão Geral
@@ -364,48 +294,44 @@ with tabs[1]:
 
         col3, col4 = st.columns(2)
 
-        # ---- Tempo médio de atendimento (h) — CONVERSÃO ROBUSTA ----
+        # ---- Tempo médio de atendimento (HORAS) — CONVERSÃO ESTRITA ----
         with col3:
-            # candidatos de coluna de tempo de atendimento
             cand_tma = [
-                "mean_total HH:MM:SS", "mean_total", "Tempo médio de atendimento",
-                "Tempo medio de atendimento", "_handle_seconds", "handle_seconds",
-                "mean_total_seconds", "Tempo médio de atendimento (s)"
+                "mean_total HH:MM:SS","mean_total","Tempo médio de atendimento",
+                "Tempo medio de atendimento","_handle_seconds","handle_seconds",
+                "mean_total_seconds","Tempo médio de atendimento (s)","tempo em segundos"
             ]
             tcol = find_best_column(dfc, cand_tma)
             if tcol is None:
                 st.warning("Não encontrei a coluna de tempo de atendimento (ex.: 'mean_total HH:MM:SS').")
             else:
                 dft = dfc.copy()
-                dft["Tempo médio de atendimento (h)"] = serie_para_horas(dft[tcol])
-                if dft["Tempo médio de atendimento (h)"].notna().any():
-                    st.plotly_chart(
-                        px.bar(
-                            dft, x="Canal", y="Tempo médio de atendimento (h)",
-                            title="Tempo médio de atendimento (h)"
-                        ),
-                        use_container_width=True
-                    )
-                else:
-                    st.warning("Não foi possível converter o tempo para horas.")
+                dft["Tempo médio de atendimento (horas)"] = to_hours_strict(dft[tcol])
+                st.plotly_chart(
+                    px.bar(
+                        dft, x="Canal", y="Tempo médio de atendimento (horas)",
+                        title="Tempo médio de atendimento (horas)"
+                    ),
+                    use_container_width=True
+                )
 
-        # ---- Tempo médio de espera (h) — se existir ----
+        # ---- Tempo médio de espera (HORAS) — mesma regra ----
         with col4:
             cand_wait = [
-                "mean_wait HH:MM:SS", "mean_wait", "Tempo médio de espera",
-                "Tempo medio de espera", "wait_seconds", "mean_wait_seconds",
-                "Tempo médio de espera (s)"
+                "mean_wait HH:MM:SS","mean_wait","Tempo médio de espera",
+                "Tempo medio de espera","wait_seconds","mean_wait_seconds",
+                "Tempo médio de espera (s)","espera em segundos"
             ]
             wcol = find_best_column(dfc, cand_wait)
             if wcol is None:
                 st.info("Coluna de tempo de espera não encontrada para este mês.")
             else:
                 dfw = dfc.copy()
-                dfw["Tempo médio de espera (h)"] = serie_para_horas(dfw[wcol])
+                dfw["Tempo médio de espera (horas)"] = to_hours_strict(dfw[wcol])
                 st.plotly_chart(
                     px.bar(
-                        dfw, x="Canal", y="Tempo médio de espera (h)",
-                        title="Tempo médio de espera (h)"
+                        dfw, x="Canal", y="Tempo médio de espera (horas)",
+                        title="Tempo médio de espera (horas)"
                     ),
                     use_container_width=True
                 )
@@ -414,19 +340,18 @@ with tabs[1]:
         st.markdown("#### Tabela por Canal (mês atual)")
         st.dataframe(dfc, use_container_width=True)
 
-# 3) Comparativo Mensal (resumo simples)
+# 3) Comparativo Mensal (exemplo simples)
 with tabs[2]:
     st.subheader("Comparativo Mensal — resumo")
     months_dict = st.session_state["months"]
     if not months_dict:
         st.info("Nenhum mês carregado.")
     else:
-        # exemplo: comparação de média de CSAT por mês (média global do DF por canal)
         rows = []
         for mkey, payload in sorted(months_dict.items()):
             df = payload.get("by_channel")
             if isinstance(df, pd.DataFrame) and not df.empty:
-                csat_col = find_best_column(df, ["Média CSAT", "media csat", "avg", "media"])
+                csat_col = find_best_column(df, ["Média CSAT","media csat","avg","media"])
                 if csat_col:
                     v = pd.to_numeric(df[csat_col], errors="coerce").mean()
                     rows.append({"mes": mkey, "Média CSAT (global)": v})
@@ -441,11 +366,11 @@ with tabs[2]:
 with tabs[3]:
     st.subheader("Dicionário de Dados (colunas reconhecidas)")
     st.markdown("""
-- **Por Canal (tempo)**: `mean_total HH:MM:SS`, `mean_total`, `Tempo médio de atendimento`, `_handle_seconds`, `handle_seconds`, `mean_total_seconds`.
-- **Por Canal (espera)**: `mean_wait HH:MM:SS`, `mean_wait`, `Tempo médio de espera`, `wait_seconds`, `mean_wait_seconds`.
-- **CSAT Médio**: `Média CSAT`, `avg`, `media`.
-- **Respostas CSAT (contagem)**: `Respostas CSAT`, `score_total`, `ratings`, `Avaliações`, `Total de avaliações`, `qtd`, `qtde`.
-- **Nome do Canal**: `Canal`, `Categoria`, `canal`, `channel` (renomeado para `Canal`).
+**Tempo de atendimento (por canal)**: `mean_total HH:MM:SS`, `mean_total`, `Tempo médio de atendimento`, `_handle_seconds`, `handle_seconds`, `mean_total_seconds`, `Tempo médio de atendimento (s)`.  
+**Tempo de espera (por canal)**: `mean_wait HH:MM:SS`, `mean_wait`, `Tempo médio de espera`, `wait_seconds`, `mean_wait_seconds`, `Tempo médio de espera (s)`.  
+**CSAT Médio**: `Média CSAT`, `avg`, `media`.  
+**Respostas CSAT (contagem)**: `Respostas CSAT`, `score_total`, `ratings`, `Avaliações`, `Total de avaliações`, `qtd`, `qtde`.  
+**Nome do Canal**: `Canal` (ou `Categoria`, `canal`, `channel` → renomeado para `Canal`).  
     """)
 
 # 5) Análise dos Canais
@@ -457,7 +382,6 @@ with tabs[4]:
     if not months_dict:
         st.info("Nenhum mês carregado.")
     else:
-        # Monta registros por mês
         count_candidates = [
             "Respostas CSAT","Quantidade de respostas CSAT","qtd respostas csat","qtd csat",
             "Respostas","Avaliadas","Avaliações","Total de avaliações",
@@ -465,14 +389,11 @@ with tabs[4]:
         ]
         csat_candidates = ["Média CSAT","media csat","avg","media","CSAT","csat","CSAT Médio","csat médio"]
 
-        rec_counts = []
-        rec_scores = []
+        rec_counts, rec_scores = [], []
 
         for mkey, payload in sorted(months_dict.items()):
-            # escolhe um DF por canal
             df = payload.get("by_channel")
             if not isinstance(df, pd.DataFrame) or df.empty:
-                # tenta alternativa com coluna Canal
                 for v in payload.values():
                     if isinstance(v, pd.DataFrame) and "Canal" in v.columns:
                         df = v
@@ -486,10 +407,7 @@ with tabs[4]:
             # contagem
             ccol = None
             for c in count_candidates:
-                k = c.lower()
-                if k in colmap:
-                    ccol = colmap[k]
-                    break
+                if c.lower() in colmap: ccol = colmap[c.lower()]; break
             if ccol is not None:
                 tmp = df[["Canal", ccol]].copy()
                 tmp[ccol] = pd.to_numeric(tmp[ccol], errors="coerce")
@@ -502,10 +420,7 @@ with tabs[4]:
             # média csat
             scol = None
             for c in csat_candidates:
-                k = c.lower()
-                if k in colmap:
-                    scol = colmap[k]
-                    break
+                if c.lower() in colmap: scol = colmap[c.lower()]; break
             if scol is not None:
                 tmp2 = df[["Canal", scol]].copy()
                 tmp2[scol] = pd.to_numeric(tmp2[scol], errors="coerce")
@@ -517,7 +432,6 @@ with tabs[4]:
 
         colA, colB = st.columns(2)
 
-        # menores quantidades
         with colA:
             st.markdown("**Menor quantidade de respostas do CSAT por mês**")
             n_counts = st.number_input("Quantos canais exibir (menores quantidades)?", 1, 10, 3, 1, key="n_counts")
@@ -525,16 +439,13 @@ with tabs[4]:
                 st.warning("Não encontrei uma coluna de contagem de respostas por canal nos dados persistidos.")
             else:
                 dd = pd.concat(rec_counts, ignore_index=True)
-                tops = []
-                for mval, grp in dd.groupby("mes", as_index=False):
-                    tops.append(grp.sort_values("Respostas CSAT", ascending=True).head(int(n_counts)))
+                tops = [g.sort_values("Respostas CSAT", ascending=True).head(int(n_counts)) for _, g in dd.groupby("mes", as_index=False)]
                 dd_top = pd.concat(tops, ignore_index=True)
                 st.plotly_chart(px.bar(dd_top, x="mes", y="Respostas CSAT", color="Canal",
                                        barmode="group", title="Menores quantidades de respostas (CSAT) por mês"),
                                 use_container_width=True)
-                st.dataframe(dd_top.sort_values(["mes", "Respostas CSAT", "Canal"]), use_container_width=True)
+                st.dataframe(dd_top.sort_values(["mes","Respostas CSAT","Canal"]), use_container_width=True)
 
-        # menores notas
         with colB:
             st.markdown("**Menores notas de CSAT por mês**")
             n_scores = st.number_input("Quantos canais exibir (menores notas)?", 1, 10, 3, 1, key="n_scores")
@@ -542,11 +453,9 @@ with tabs[4]:
                 st.info("Não encontrei coluna de 'Média CSAT' nos dados por canal dos meses persistidos.")
             else:
                 dd2 = pd.concat(rec_scores, ignore_index=True)
-                tops2 = []
-                for mval, grp in dd2.groupby("mes", as_index=False):
-                    tops2.append(grp.sort_values("Média CSAT", ascending=True).head(int(n_scores)))
+                tops2 = [g.sort_values("Média CSAT", ascending=True).head(int(n_scores)) for _, g in dd2.groupby("mes", as_index=False)]
                 dd2_top = pd.concat(tops2, ignore_index=True)
                 st.plotly_chart(px.bar(dd2_top, x="mes", y="Média CSAT", color="Canal",
                                        barmode="group", title="Menores notas de CSAT por mês"),
                                 use_container_width=True)
-                st.dataframe(dd2_top.sort_values(["mes", "Média CSAT", "Canal"]), use_container_width=True)
+                st.dataframe(dd2_top.sort_values(["mes","Média CSAT","Canal"]), use_container_width=True)
