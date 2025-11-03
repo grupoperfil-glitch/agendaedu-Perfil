@@ -1,26 +1,27 @@
-# app.py — Dashboard CSAT (XLSX) — GitHub (árvore recursiva) + Upload mensal
-# --------------------------------------------------------------------------
+# app.py — Dashboard CSAT (XLSX) — GitHub via ZIP + Upload mensal
+# ---------------------------------------------------------------
 # Requisitos:
 #   pip install streamlit plotly pandas numpy openpyxl requests
 #
 # Secrets (opcionais) — .streamlit/secrets.toml:
-#   GITHUB_DATA_TOKEN   = "ghp_xxx"                         # recomendado (evita rate limit)
+#   GITHUB_DATA_TOKEN   = "ghp_xxx"                         # opcional (evita alguns limites)
 #   GITHUB_DATA_REPO    = "grupoperfil-glitch/csat-dashboard-data"
 #   GITHUB_DATA_BRANCH  = "main"
-#   GITHUB_DATA_PATH    = "data"
+#   GITHUB_DATA_PATH    = "data"                            # subpasta contendo os .xlsx
 #
 # O app:
-#  - Lê TODO o repositório via /git/trees?recursive=1, filtra por GITHUB_DATA_PATH e acha meses (YYYY-MM)
-#    tanto por subpasta quanto por presença no NOME DO ARQUIVO (com timestamp).
-#  - Aceita upload múltiplo mensal; reconhece os arquivos pelas palavras-chave no nome.
+#  - Baixa o repositório como ZIP (codeload.github.com) e lê TODOS os .xlsx dentro de GITHUB_DATA_PATH,
+#    agrupando por mês (YYYY-MM) encontrado no caminho ou no nome do arquivo (mesmo com timestamp).
+#  - Aceita upload múltiplo mensal; reconhece os arquivos por palavras-chave no nome.
 #  - Converte “Tempo médio de atendimento” para HORAS (regra estrita).
-#  - Inclui aba “Análise dos Canais”.
+#  - Inclui aba “Análise dos Canais” (piores por menor quantidade de respostas e por menor nota).
 
 from __future__ import annotations
-import os, re, json, base64
+import os, re
 from io import BytesIO
 from datetime import date
 from typing import Dict, List, Optional, Tuple
+from zipfile import ZipFile
 
 import requests
 import numpy as np
@@ -43,8 +44,7 @@ GH_PATH   = _get_secret("GITHUB_DATA_PATH",   "data").strip("/")
 GH_TOKEN  = _get_secret("GITHUB_DATA_TOKEN",  "")
 
 LOCAL_STORE_DIR = "data_store"
-GH_API_BASE = "https://api.github.com"
-RAW_BASE    = "https://raw.githubusercontent.com"
+RAW_ZIP_URL     = f"https://codeload.github.com/{GH_REPO}/zip/refs/heads/{GH_BRANCH}"
 
 LAST_GH_STATUS: List[str] = []  # diagnóstico simples
 
@@ -94,8 +94,7 @@ def to_hours_strict(series: pd.Series) -> pd.Series:
        - string com ':' => HH:MM:SS => horas
        - numérico => SEMPRE segundos => horas
     """
-    s = series.copy()
-    s_str = s.astype(str)
+    s_str = series.astype(str)
     has_colon = s_str.str.contains(":", regex=False)
     out = pd.Series(index=series.index, dtype="float64")
     # HH:MM:SS
@@ -129,7 +128,7 @@ def detect_kind(filename: str) -> Optional[str]:
     return None
 
 def extract_month_from_any(s: str) -> Optional[str]:
-    """Extrai a PRIMEIRA ocorrência de AAAA-MM em um caminho ou nome."""
+    """Extrai a primeira ocorrência de AAAA-MM em um caminho ou nome."""
     m = re.search(r"\d{4}-\d{2}", s)
     return m.group(0) if m else None
 
@@ -150,7 +149,7 @@ def build_by_channel(payload: dict) -> dict:
         merged = df.copy() if merged is None else merged.merge(df, on="Canal", how="outer")
 
     if isinstance(merged, pd.DataFrame):
-        # padroniza nomes comuns
+        # Padroniza nomes mais comuns
         mcol = find_best_column(merged, ["Média CSAT","media csat","avg","media"])
         if mcol and mcol != "Média CSAT":
             merged = merged.rename(columns={mcol: "Média CSAT"})
@@ -165,73 +164,55 @@ def build_by_channel(payload: dict) -> dict:
     return payload
 
 # ======================
-# GitHub: leitura pela ÁRVORE (100% abrangente)
+# GitHub (ZIP): leitura robusta
 # ======================
-def gh_headers() -> Dict[str, str]:
-    h = {"Accept": "application/vnd.github+json"}
+def fetch_repo_zip_bytes() -> Optional[bytes]:
+    headers = {}
     if GH_TOKEN:
-        h["Authorization"] = f"token {GH_TOKEN}"
-    return h
-
-def gh_list_all_blob_paths() -> List[str]:
-    """Usa /git/trees/{branch}?recursive=1 para listar TODOS os caminhos (type=blob)."""
-    url = f"{GH_API_BASE}/repos/{GH_REPO}/git/trees/{GH_BRANCH}?recursive=1"
+        # codeload normalmente funciona sem token para públicos; deixo header caso precise
+        headers["Authorization"] = f"token {GH_TOKEN}"
     try:
-        r = requests.get(url, headers=gh_headers(), timeout=60)
-        LAST_GH_STATUS.append(f"GET {url} -> {r.status_code}")
-        if r.status_code != 200:
-            return []
-        data = r.json()
-        tree = data.get("tree", [])
-        return [it["path"] for it in tree if it.get("type") == "blob"]
-    except Exception as e:
-        LAST_GH_STATUS.append(f"ERR trees: {e}")
-        return []
-
-def raw_download(path: str) -> Optional[bytes]:
-    """Baixa conteúdo via raw.githubusercontent.com (para repositórios públicos)."""
-    url = f"{RAW_BASE}/{GH_REPO}/{GH_BRANCH}/{path}"
-    try:
-        r = requests.get(url, headers=gh_headers(), timeout=60)
-        LAST_GH_STATUS.append(f"GET {url} -> {r.status_code}")
+        r = requests.get(RAW_ZIP_URL, headers=headers, timeout=120)
+        LAST_GH_STATUS.append(f"GET {RAW_ZIP_URL} -> {r.status_code}")
         if r.status_code != 200:
             return None
         return r.content
     except Exception as e:
-        LAST_GH_STATUS.append(f"ERR raw: {e}")
+        LAST_GH_STATUS.append(f"ERR ZIP: {e}")
         return None
 
-def group_repo_files_by_month_via_tree() -> Dict[str, List[str]]:
+def group_zip_files_by_month(zf: ZipFile) -> Dict[str, List[str]]:
     """
-    Agrupa caminhos de arquivos .xlsx por mês (YYYY-MM), considerando:
-      - subpastas YYYY-MM dentro de GH_PATH
-      - nomes com YYYY-MM
+    Dentro do ZIP, encontra todos os .xlsx sob a pasta GH_PATH (recursivo) e agrupa por mês.
     """
-    paths = gh_list_all_blob_paths()
-    out: Dict[str, List[str]] = {}
-    prefix = f"{GH_PATH}/" if GH_PATH else ""
-    for p in paths:
-        if not p.lower().endswith(".xlsx"):
+    names = zf.namelist()
+    months: Dict[str, List[str]] = {}
+    # raiz do zip costuma ser "<repo>-<branch>/"
+    root = names[0].split("/")[0] if names else ""
+    base_prefix = f"{root}/{GH_PATH.strip('/')}/" if GH_PATH else f"{root}/"
+
+    for n in names:
+        if not n.lower().endswith(".xlsx"):
             continue
-        if GH_PATH and not p.startswith(prefix) and p != GH_PATH:
+        if base_prefix and not n.startswith(base_prefix):
             continue
-        # tenta subpasta com mês
-        parts = p.split("/")
-        found_month = None
+        month = None
+        # tenta extrair AAAA-MM em qualquer segmento
+        parts = n.split("/")
         for seg in parts:
             m = extract_month_from_any(seg)
             if m:
-                found_month = m
+                month = m
                 break
-        if not found_month:
-            found_month = extract_month_from_any(os.path.basename(p))
-        if not found_month:
-            # não conseguimos identificar o mês -> ignora
+        if not month:
+            # tenta no nome do arquivo
+            month = extract_month_from_any(os.path.basename(n))
+        if not month:
             continue
-        out.setdefault(found_month, []).append(p)
-    return out
+        months.setdefault(month, []).append(n)
+    return months
 
-def gh_read_month_payload_from_paths(paths: List[str]) -> dict:
+def gh_read_month_payload_from_zip(zf: ZipFile, paths: List[str]) -> dict:
     payload: dict = {}
     by_kind: Dict[str, List[str]] = {}
     for p in paths:
@@ -239,30 +220,34 @@ def gh_read_month_payload_from_paths(paths: List[str]) -> dict:
         if kind:
             by_kind.setdefault(kind, []).append(p)
     for kind, lst in by_kind.items():
-        sel = sorted(lst)[-1]  # heurística simples: escolhe o "maior" nome (geralmente com timestamp mais novo)
-        b = raw_download(sel)
-        if b:
-            try:
-                df = load_xlsx_from_bytes(b)
-                payload[kind] = df
-            except Exception:
-                LAST_GH_STATUS.append(f"Falha ao ler XLSX: {sel}")
+        sel = sorted(lst)[-1]  # pega o "mais novo" pelo nome
+        try:
+            b = zf.read(sel)
+            df = load_xlsx_from_bytes(b)
+            payload[kind] = df
+        except Exception:
+            LAST_GH_STATUS.append(f"Falha ao ler XLSX do ZIP: {sel}")
     return build_by_channel(payload)
 
-def load_all_github_months_into_state(force: bool = False) -> Tuple[int, int]:
-    """Carrega todos os meses do GitHub. Retorna (#meses, #arquivos)."""
-    grouped = group_repo_files_by_month_via_tree()
-    months_loaded = 0
-    files_count = 0
-    for m, paths in sorted(grouped.items()):
-        files_count += len(paths)
-        if not force and m in st.session_state["months"]:
-            continue
-        payload = gh_read_month_payload_from_paths(paths)
-        if payload:
-            st.session_state["months"][m] = payload
-            months_loaded += 1
-    return months_loaded, files_count
+def load_all_github_months_via_zip(force: bool = False) -> Tuple[int, int]:
+    """
+    Carrega todos os meses lendo o repositório via ZIP. Retorna (#meses, #arquivos).
+    """
+    b = fetch_repo_zip_bytes()
+    if not b:
+        return (0, 0)
+    with ZipFile(BytesIO(b)) as zf:
+        grouped = group_zip_files_by_month(zf)
+        months_loaded = 0
+        files_count = sum(len(v) for v in grouped.values())
+        for m, paths in sorted(grouped.items()):
+            if not force and m in st.session_state["months"]:
+                continue
+            payload = gh_read_month_payload_from_zip(zf, paths)
+            if payload:
+                st.session_state["months"][m] = payload
+                months_loaded += 1
+        return (months_loaded, files_count)
 
 # ======================
 # Local (fallback)
@@ -321,16 +306,16 @@ def ingest_uploaded_files(files: List) -> Dict[str, pd.DataFrame]:
 # ======================
 # Streamlit App
 # ======================
-st.set_page_config(page_title="Dashboard CSAT — GitHub + Upload", layout="wide")
-st.title("Dashboard CSAT (XLSX) — Fonte GitHub + Upload mensal")
-st.caption(f"Fonte GitHub: **{GH_REPO} / {GH_BRANCH} / {GH_PATH}**. Busca por árvore recursiva; aceita uploads com nomes contendo palavras-chave e timestamps.")
+st.set_page_config(page_title="Dashboard CSAT — GitHub (ZIP) + Upload", layout="wide")
+st.title("Dashboard CSAT (XLSX) — Fonte GitHub (ZIP) + Upload mensal")
+st.caption(f"Fonte GitHub: **{GH_REPO} / {GH_BRANCH} / {GH_PATH}** — leitura via ZIP (sem /git/trees).")
 
 # Estado
 if "months" not in st.session_state:
     st.session_state["months"] = {}
 
-# Carrega do GitHub na inicialização (com diagnóstico)
-gh_loaded, gh_files = load_all_github_months_into_state(force=False)
+# Carrega do GitHub via ZIP na inicialização (com diagnóstico)
+gh_loaded, gh_files = load_all_github_months_via_zip(force=False)
 local_loaded = load_all_local_months_into_state()
 
 # Sidebar
@@ -342,25 +327,22 @@ with st.sidebar:
     mk = month_key(int(year), int(month))
 
     st.write("---")
-    st.markdown("**Fonte dos dados (GitHub)**")
+    st.markdown("**Fonte dos dados (GitHub via ZIP)**")
     st.write(f"Repo: `{GH_REPO}` / Branch: `{GH_BRANCH}` / Path: `{GH_PATH}`")
     if GH_TOKEN:
-        st.success("Token GitHub detectado (requisições autenticadas).")
+        st.success("Token configurado (pode ajudar com limites).")
     else:
-        st.info("Sem token: requisições públicas (60 req/hora).")
+        st.info("Sem token: ZIP público (funciona para repositórios públicos).")
 
-    if st.button("Recarregar do GitHub (todos os meses)"):
+    if st.button("Recarregar do GitHub (ZIP) — todos os meses"):
         LAST_GH_STATUS.clear()
-        loaded, files_cnt = load_all_github_months_into_state(force=True)
-        st.success(f"Recarregados do GitHub: {loaded} mês(es) — {files_cnt} arquivo(s) analisado(s).")
-        if LAST_GH_STATUS:
-            with st.expander("Diagnóstico GitHub (últimas chamadas)"):
-                st.code("\n".join(LAST_GH_STATUS[-15:]))
+        loaded, files_cnt = load_all_github_months_via_zip(force=True)
+        st.success(f"Recarregados do GitHub (ZIP): {loaded} mês(es) — {files_cnt} arquivo(s) analisado(s).")
 
-    with st.expander("Diagnóstico inicial (GitHub)"):
+    with st.expander("Diagnóstico GitHub"):
         st.write(f"Meses carregados agora: **{gh_loaded}** | Arquivos vistoriados: **{gh_files}** | Fallback local: **{local_loaded}**")
         if LAST_GH_STATUS:
-            st.code("\n".join(LAST_GH_STATUS[-15:]))
+            st.code("\n".join(LAST_GH_STATUS[-10:]))
 
     st.write("---")
     st.subheader("Upload mensal (.xlsx)")
