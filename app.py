@@ -119,6 +119,28 @@ def to_hours_strict(series: pd.Series) -> pd.Series:
     return out
 
 
+def sum_numeric_safe(df: pd.DataFrame) -> Optional[int]:
+    """Soma segura de todas as células numéricas de um DataFrame.
+    - Usa apenas colunas numéricas quando disponíveis;
+    - Caso não haja, tenta coerção numérica por coluna (erros->NaN) e soma;
+    - Retorna None se nada numérico existir.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+    num_only = df.select_dtypes(include=[np.number])
+    if not num_only.empty:
+        total = pd.to_numeric(num_only.stack(), errors="coerce").sum()
+        return int(total) if not pd.isna(total) else None
+    # tenta coerção ampla
+    coerced = df.apply(pd.to_numeric, errors="coerce")
+    num_only2 = coerced.select_dtypes(include=[np.number])
+    if num_only2.empty:
+        return None
+    total2 = num_only2.stack().sum()
+    return int(total2) if not pd.isna(total2) else None
+
+
+
 # ======================
 # Mapeamento de arquivos
 # ======================
@@ -429,6 +451,15 @@ with st.sidebar:
                     st.write(f"Arquivos (.xlsx/.csv) encontrados sob GH_PATH: **{len(in_path)}**")
                     grouped = group_zip_files_by_month(zf)
                     st.write(f"Meses mapeados: {sorted(grouped.keys())}")
+                    # --- Testes rápidos da função sum_numeric_safe ---
+                    df1 = pd.DataFrame({"a":[1,2], "b":[3,4]})
+                    df2 = pd.DataFrame({"a":["1","x"], "b":["2","3"]})
+                    df3 = pd.DataFrame({"a":["x","y"]})
+                    st.write("Testes sum_numeric_safe:", {
+                        "df1 (esperado 10)": sum_numeric_safe(df1),
+                        "df2 (esperado 6)": sum_numeric_safe(df2),
+                        "df3 (esperado None)": sum_numeric_safe(df3),
+                    })
 
     st.write("---")
     st.subheader("Upload mensal (.xlsx)")
@@ -504,13 +535,15 @@ with tabs[0]:
         with cols[0]:
             df = payload.get("total_atendimentos")
             if isinstance(df, pd.DataFrame) and not df.empty:
-                v = int(pd.to_numeric(df.select_dtypes(include=[np.number]), errors="coerce").sum().sum())
-                st.metric("Total de Atendimentos (arquivo)", v)
+                v = sum_numeric_safe(df)
+                if v is not None:
+                    st.metric("Total de Atendimentos (arquivo)", v)
         with cols[1]:
             df = payload.get("total_atendimentos_conc")
             if isinstance(df, pd.DataFrame) and not df.empty:
-                v = int(pd.to_numeric(df.select_dtypes(include=[np.number]), errors="coerce").sum().sum())
-                st.metric("Atendimentos Concluídos (arquivo)", v)
+                v = sum_numeric_safe(df)
+                if v is not None:
+                    st.metric("Atendimentos Concluídos (arquivo)", v)
         with cols[2]:
             df = payload.get("tma_geral")
             if isinstance(df, pd.DataFrame) and not df.empty:
