@@ -46,6 +46,8 @@ GH_TOKEN  = _get_secret("GITHUB_DATA_TOKEN",  "")
 
 LOCAL_STORE_DIR = "data_store"
 RAW_ZIP_URL     = f"https://codeload.github.com/{GH_REPO}/zip/refs/heads/{GH_BRANCH}"
+# Mês atual (fallback quando não há AAAA-MM nos caminhos/nomes)
+TODAY_MK        = f"{date.today().year:04d}-{date.today().month:02d}"
 
 LAST_GH_STATUS: List[str] = []  # diagnóstico simples
 
@@ -141,9 +143,11 @@ def detect_kind(filename: str) -> Optional[str]:
 
 
 def extract_month_from_any(s: str) -> Optional[str]:
-    """Extrai a primeira ocorrência de AAAA-MM em um caminho ou nome."""
-    m = re.search(r"\d{4}-\d{2}", s)
-    return m.group(0) if m else None
+    """Extrai AAAA-MM de forma flexível (YYYY[-_./ ]MM)."""
+    m = re.search(r"(?P<y>20[0-9]{2})[-_./ ](?P<m>0[1-9]|1[0-2])", s)
+    if m:
+        return f"{m.group('y')}-{m.group('m')}"
+    return None
 
 
 # ======================
@@ -184,14 +188,30 @@ def build_by_channel(payload: dict) -> dict:
 # ======================
 
 def fetch_repo_zip_bytes() -> Optional[bytes]:
+    # 1) Tenta API zipball (suporta repositórios privados)
     headers = {}
     if GH_TOKEN:
-        headers["Authorization"] = f"token {GH_TOKEN}"
+        headers["Authorization"] = f"Bearer {GH_TOKEN}"
     try:
-        r = requests.get(RAW_ZIP_URL, headers=headers, timeout=120)
-        LAST_GH_STATUS.append(f"GET {RAW_ZIP_URL} -> {r.status_code}")
-        if r.status_code != 200:
-            return None
+        api_zip_url = f"https://api.github.com/repos/{GH_REPO}/zipball/{GH_BRANCH}"
+        r = requests.get(api_zip_url, headers=headers, timeout=120, allow_redirects=True)
+        LAST_GH_STATUS.append(f"GET {api_zip_url} -> {r.status_code}")
+        if r.status_code == 200 and r.content:
+            return r.content
+    except Exception as e:
+        LAST_GH_STATUS.append(f"ERR API ZIP: {e}")
+    # 2) Fallback para codeload (público; alguns ambientes aceitam header 'token')
+    try:
+        headers2 = {}
+        if GH_TOKEN:
+            headers2["Authorization"] = f"token {GH_TOKEN}"
+        r2 = requests.get(RAW_ZIP_URL, headers=headers2, timeout=120)
+        LAST_GH_STATUS.append(f"GET {RAW_ZIP_URL} -> {r2.status_code}")
+        if r2.status_code == 200:
+            return r2.content
+    except Exception as e2:
+        LAST_GH_STATUS.append(f"ERR ZIP (codeload): {e2}")
+    return None
         return r.content
     except Exception as e:
         LAST_GH_STATUS.append(f"ERR ZIP: {e}")
@@ -199,7 +219,10 @@ def fetch_repo_zip_bytes() -> Optional[bytes]:
 
 
 def group_zip_files_by_month(zf: ZipFile) -> Dict[str, List[str]]:
-    """Dentro do ZIP, encontra todos os .xlsx sob a pasta GH_PATH (recursivo) e agrupa por mês."""
+    """
+    Dentro do ZIP, encontra todos os .xlsx sob a pasta GH_PATH (recursivo) e agrupa por mês.
+    Se não encontrar AAAA-MM, usa o mês atual (TODAY_MK) como fallback para garantir leitura.
+    """
     names = zf.namelist()
     months: Dict[str, List[str]] = {}
     root = names[0].split("/")[0] if names else ""
@@ -211,16 +234,15 @@ def group_zip_files_by_month(zf: ZipFile) -> Dict[str, List[str]]:
         if base_prefix and not n.startswith(base_prefix):
             continue
         month = None
-        parts = n.split("/")
-        for seg in parts:
-            m = extract_month_from_any(seg)
-            if m:
-                month = m
+        for seg in n.split("/"):
+            month = extract_month_from_any(seg)
+            if month:
                 break
         if not month:
             month = extract_month_from_any(os.path.basename(n))
         if not month:
-            continue
+            month = TODAY_MK
+            LAST_GH_STATUS.append(f"[WARN] Sem AAAA-MM em: {n} -> usando {month}")
         months.setdefault(month, []).append(n)
     return months
 
