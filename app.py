@@ -139,6 +139,144 @@ def sum_numeric_safe(df: pd.DataFrame) -> Optional[int]:
     total2 = num_only2.stack().sum()
     return int(total2) if not pd.isna(total2) else None
 
+# ======================
+# KPIs e SLAs
+# ======================
+
+SLA = {
+    "COMPLETION_RATE_MIN": 90.0,        # > 90%
+    "FIRST_RESPONSE_MAX_H": 24.0,       # < 24h
+    "CSAT_MIN": 4.0,                    # >= 4.0
+    "EVAL_COVERAGE_MIN": 75.0           # >= 75%
+}
+
+def _sum_col_if_exists(df: pd.DataFrame, colnames: List[str]) -> Optional[float]:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+    lower = {str(c).strip().lower(): c for c in df.columns}
+    for name in colnames:
+        key = name.lower()
+        if key in lower:
+            v = pd.to_numeric(df[lower[key]], errors="coerce").sum()
+            return float(v) if not pd.isna(v) else None
+    # fallback: soma numérica geral
+    s = sum_numeric_safe(df)
+    return float(s) if s is not None else None
+
+
+def _mean_hours_from_df(df: pd.DataFrame, candidates: List[str]) -> Optional[float]:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+    col = find_best_column(df, candidates)
+    if not col:
+        return None
+    try:
+        h = to_hours_strict(df[col]).mean()
+        return float(h) if not pd.isna(h) else None
+    except Exception:
+        return None
+
+
+def compute_kpis_from_payload(payload: dict) -> dict:
+    """Computa KPIs principais a partir do payload de um mês.
+    Retorna dict com chaves: total, completed, completion_rate, first_response_h, csat_avg, evaluated, eval_coverage.
+    Usa fallbacks quando possível (ex.: por canal).
+    """
+    k = {
+        "total": None,
+        "completed": None,
+        "completion_rate": None,
+        "first_response_h": None,
+        "csat_avg": None,
+        "evaluated": None,
+        "eval_coverage": None,
+    }
+    # Totais
+    if "total_atendimentos" in payload:
+        k["total"] = _sum_col_if_exists(payload["total_atendimentos"], ["total_tickets"]) or _sum_col_if_exists(payload["total_atendimentos"], [])
+    if "total_atendimentos_conc" in payload:
+        k["completed"] = _sum_col_if_exists(payload["total_atendimentos_conc"], ["total_tickets"]) or _sum_col_if_exists(payload["total_atendimentos_conc"], [])
+    # Fallback a partir de by_channel
+    byc = payload.get("by_channel")
+    if (k["total"] is None) and isinstance(byc, pd.DataFrame):
+        k["total"] = _sum_col_if_exists(byc, ["Total de atendimentos"]) or _sum_col_if_exists(byc, [])
+    if (k["completed"] is None) and isinstance(byc, pd.DataFrame):
+        k["completed"] = _sum_col_if_exists(byc, ["Total de atendimentos concluídos"]) or _sum_col_if_exists(byc, [])
+
+    # Completion rate
+    if k["total"] not in (None, 0) and k["completed"] is not None:
+        try:
+            k["completion_rate"] = (k["completed"] / k["total"]) * 100.0
+        except Exception:
+            k["completion_rate"] = None
+
+    # First response (tempo médio de espera)
+    if "tme_geral" in payload:
+        k["first_response_h"] = _mean_hours_from_df(payload["tme_geral"], [
+            "mean_total HH:MM:SS","mean_total","Tempo médio de espera","tempo medio de espera","wait_seconds","mean_wait_seconds"
+        ])
+    if k["first_response_h"] is None and isinstance(byc, pd.DataFrame):
+        k["first_response_h"] = _mean_hours_from_df(byc, [
+            "mean_wait HH:MM:SS","mean_wait","Tempo médio de espera","wait_seconds","mean_wait_seconds","Tempo médio de espera (s)"
+        ])
+
+    # CSAT médio
+    if "media_csat" in payload:
+        col = find_best_column(payload["media_csat"], ["avg","Média CSAT","media"])
+        if col:
+            try:
+                k["csat_avg"] = float(pd.to_numeric(payload["media_csat"][col], errors="coerce").dropna().iloc[0])
+            except Exception:
+                pass
+    if k["csat_avg"] is None and isinstance(byc, pd.DataFrame):
+        col = find_best_column(byc, ["Média CSAT","media csat","avg","media"])
+        if col:
+            v = pd.to_numeric(byc[col], errors="coerce").mean()
+            k["csat_avg"] = float(v) if not pd.isna(v) else None
+
+    # Avaliadas (avaliadas = soma de score_total no csat por categoria; fallback: Respostas CSAT por canal)
+    if "csat" in payload:
+        k["evaluated"] = _sum_col_if_exists(payload["csat"], ["score_total"]) 
+    if (k["evaluated"] is None) and isinstance(byc, pd.DataFrame):
+        k["evaluated"] = _sum_col_if_exists(byc, ["Respostas CSAT"]) 
+
+    if k["evaluated"] is not None and k["completed"] not in (None, 0):
+        try:
+            k["eval_coverage"] = (k["evaluated"] / k["completed"]) * 100.0
+        except Exception:
+            k["eval_coverage"] = None
+
+    return k
+
+
+def sla_flags(k: dict) -> dict:
+    """Retorna flags (ok, warn) por KPI de acordo com limites SLA."""
+    flags = {}
+    # Completion
+    cr = k.get("completion_rate")
+    if cr is not None:
+        ok = cr > SLA["COMPLETION_RATE_MIN"]
+        warn = not ok and (cr >= SLA["COMPLETION_RATE_MIN"] * 0.95)
+        flags["completion"] = (ok, warn)
+    # First response (horas)
+    fr = k.get("first_response_h")
+    if fr is not None:
+        ok = fr < SLA["FIRST_RESPONSE_MAX_H"]
+        warn = not ok and (fr <= SLA["FIRST_RESPONSE_MAX_H"] * 1.05)
+        flags["first_response"] = (ok, warn)
+    # CSAT
+    cs = k.get("csat_avg")
+    if cs is not None:
+        ok = cs >= SLA["CSAT_MIN"]
+        warn = not ok and (cs >= SLA["CSAT_MIN"] * 0.95)
+        flags["csat"] = (ok, warn)
+    # Cobertura
+    cov = k.get("eval_coverage")
+    if cov is not None:
+        ok = cov >= SLA["EVAL_COVERAGE_MIN"]
+        warn = not ok and (cov >= SLA["EVAL_COVERAGE_MIN"] * 0.95)
+        flags["coverage"] = (ok, warn)
+    return flags
 
 
 # ======================
@@ -531,33 +669,39 @@ with tabs[0]:
     if not payload:
         st.info("Selecione um mês com dados carregados (GitHub ou Upload).")
     else:
-        cols = st.columns(3)
-        with cols[0]:
-            df = payload.get("total_atendimentos")
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                v = sum_numeric_safe(df)
-                if v is not None:
-                    st.metric("Total de Atendimentos (arquivo)", v)
-        with cols[1]:
-            df = payload.get("total_atendimentos_conc")
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                v = sum_numeric_safe(df)
-                if v is not None:
-                    st.metric("Atendimentos Concluídos (arquivo)", v)
-        with cols[2]:
-            df = payload.get("tma_geral")
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                tcol = find_best_column(df, ["mean_total HH:MM:SS","mean_total","Tempo médio de atendimento","tempo medio de atendimento"])
-                if tcol:
-                    v = to_hours_strict(df[tcol]).mean()
-                    st.metric("Tempo médio de atendimento (h) — geral", f"{v:.2f}")
+        # --- KPIs principais ---
+        k = compute_kpis_from_payload(payload)
+        flags = sla_flags(k)
+        icon = lambda ok, warn: ("✅" if ok else ("⚠️" if warn else "❌"))
 
+        c1, c2, c3, c4 = st.columns(4)
+        # Taxa de conclusão
+        cr = k.get("completion_rate")
+        ok, warn = flags.get("completion", (False, False))
+        c1.metric("Taxa de conclusão (%)", f"{cr:.1f}%" if cr is not None else "-",
+                  help=f"SLA > {SLA['COMPLETION_RATE_MIN']}% {icon(ok, warn)}")
+        # Tempo do 1º atendimento (horas)
+        fr = k.get("first_response_h")
+        ok, warn = flags.get("first_response", (False, False))
+        c2.metric("Tempo do 1º atendimento (h)", f"{fr:.2f}" if fr is not None else "-",
+                  help=f"SLA < {SLA['FIRST_RESPONSE_MAX_H']}h {icon(ok, warn)}")
+        # CSAT médio
+        cs = k.get("csat_avg")
+        ok, warn = flags.get("csat", (False, False))
+        c3.metric("CSAT médio (1–5)", f"{cs:.2f}" if cs is not None else "-",
+                  help=f"SLA ≥ {SLA['CSAT_MIN']} {icon(ok, warn)}")
+        # Cobertura de avaliação (%)
+        cov = k.get("eval_coverage")
+        ok, warn = flags.get("coverage", (False, False))
+        c4.metric("Cobertura de avaliação (%)", f"{cov:.1f}%" if cov is not None else "-",
+                  help=f"SLA ≥ {SLA['EVAL_COVERAGE_MIN']}% {icon(ok, warn)}")
+
+        st.markdown("---")
         st.write("### Tabelas disponíveis no mês")
-        for k, vdf in payload.items():
+        for kname, vdf in payload.items():
             if isinstance(vdf, pd.DataFrame):
-                st.markdown(f"**{k}**")
+                st.markdown(f"**{kname}**")
                 st.dataframe(vdf.head(50), use_container_width=True)
-
 
 # 2) Por Canal
 with tabs[1]:
@@ -567,6 +711,10 @@ with tabs[1]:
         st.info("Sem dados por canal para o mês atual.")
     else:
         dfc = normalize_canal_column(dfc)
+        canais = sorted(dfc["Canal"].astype(str).unique())
+        sel = st.multiselect("Filtrar canais", canais, default=canais)
+        if sel:
+            dfc = dfc[dfc["Canal"].astype(str).isin(sel)]
 
         col3, col4 = st.columns(2)
 
@@ -610,29 +758,54 @@ with tabs[1]:
         st.markdown("#### Tabela por Canal (mês atual)")
         st.dataframe(dfc, use_container_width=True)
 
-
-# 3) Comparativo Mensal (exemplo simples)
+# 3) Comparativo Mensal
 with tabs[2]:
-    st.subheader("Comparativo Mensal — resumo")
+    st.subheader("Comparativo Mensal — indicadores principais")
     months_dict = st.session_state["months"]
     if not months_dict:
         st.info("Nenhum mês carregado.")
     else:
+        # Filtra pelo ano selecionado na sidebar
+        year_prefix = f"{int(year):04d}-"
         rows = []
         for mkey, payload in sorted(months_dict.items()):
-            df = payload.get("by_channel")
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                csat_col = find_best_column(df, ["Média CSAT","media csat","avg","media"])
-                if csat_col:
-                    v = pd.to_numeric(df[csat_col], errors="coerce").mean()
-                    rows.append({"mes": mkey, "Média CSAT (global)": v})
-        if rows:
-            dd = pd.DataFrame(rows)
-            st.plotly_chart(px.line(dd, x="mes", y="Média CSAT (global)", title="Média CSAT global por mês"), use_container_width=True)
-            st.dataframe(dd, use_container_width=True)
+            if not mkey.startswith(year_prefix):
+                continue
+            k = compute_kpis_from_payload(payload)
+            rows.append({
+                "mes": mkey,
+                "taxa_conclusao": k.get("completion_rate"),
+                "tempo_primeiro_atendimento_h": k.get("first_response_h"),
+                "csat_medio": k.get("csat_avg"),
+                "cobertura_avaliacao": k.get("eval_coverage"),
+            })
+        if not rows:
+            st.info("Não há meses deste ano com dados carregados.")
         else:
-            st.info("Não foi possível montar o comparativo (faltam colunas de CSAT).")
-
+            comp = pd.DataFrame(rows).sort_values("mes")
+            st.dataframe(comp, use_container_width=True)
+            c1, c2 = st.columns(2)
+            with c1:
+                st.plotly_chart(
+                    px.line(comp, x="mes", y="taxa_conclusao", markers=True, title="Taxa de conclusão (%)"),
+                    use_container_width=True
+                )
+            with c2:
+                st.plotly_chart(
+                    px.line(comp, x="mes", y="tempo_primeiro_atendimento_h", markers=True, title="Tempo do 1º atendimento (h)"),
+                    use_container_width=True
+                )
+            c3, c4 = st.columns(2)
+            with c3:
+                st.plotly_chart(
+                    px.line(comp, x="mes", y="csat_medio", markers=True, title="CSAT médio (1–5)"),
+                    use_container_width=True
+                )
+            with c4:
+                st.plotly_chart(
+                    px.line(comp, x="mes", y="cobertura_avaliacao", markers=True, title="Cobertura de avaliação (%)"),
+                    use_container_width=True
+                )
 
 # 4) Dicionário de Dados
 with tabs[3]:
