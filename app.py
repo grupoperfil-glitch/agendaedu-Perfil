@@ -1,20 +1,20 @@
-# app.py — Dashboard CSAT (XLSX) — GitHub via ZIP + Upload por arquivo (estilo v2)
+# app.py — Dashboard CSAT (XLSX/CSV) — GitHub via ZIP + Upload por arquivo (compatível com v2)
 # ---------------------------------------------------------------------------------
 # Requisitos:
 #   pip install streamlit plotly pandas numpy openpyxl requests
 #
 # Secrets (opcionais) — .streamlit/secrets.toml:
 #   GITHUB_DATA_TOKEN   = "ghp_xxx"                         # opcional (evita alguns limites)
-#   GITHUB_DATA_REPO    = "grupoperfil-glitch/csat-dashboard-data"
+#   GITHUB_DATA_REPO    = "owner/repo"                     # ex.: "grupoperfil-glitch/csat-dashboard-data"
 #   GITHUB_DATA_BRANCH  = "main"
-#   GITHUB_DATA_PATH    = "data"                            # subpasta contendo os .xlsx
+#   GITHUB_DATA_PATH    = "data"                            # subpasta contendo os .xlsx/.csv (ex.: data/2025-09/...)
 #
 # O app:
-#  - Baixa o repositório como ZIP (via API zipball ou codeload) e lê TODOS os .xlsx dentro de GITHUB_DATA_PATH,
-#    agrupando por mês (YYYY-MM) encontrado no caminho ou no nome do arquivo (mesmo com outros separadores).
+#  - Baixa o repositório como ZIP (via API zipball com token ou codeload) e lê TODOS os .xlsx/.csv dentro de GITHUB_DATA_PATH,
+#    agrupando por mês (YYYY[-_./ ]MM) encontrado no caminho ou no nome do arquivo.
 #  - **Upload por arquivo** (como no v2): campos separados para cada tipo esperado do mês atual.
-#  - Converte “Tempo médio de atendimento” **para HORAS** (regra estrita) na aba Por Canal.
-#  - Nova aba “Análise dos Canais”: (a) piores por **menor quantidade de respostas CSAT**; (b) **menores notas** (CSAT <= 3.0).
+#  - Converte “Tempo médio de atendimento/espera” **para HORAS** (regra estrita) na aba Por Canal.
+#  - Aba “Análise dos Canais”: (a) piores por **menor quantidade de respostas CSAT**; (b) **menores notas** (CSAT <= 3.0).
 #  - **Autotestes/Diagnóstico** na barra lateral para verificar conexão GitHub e mapeamento de meses.
 
 from __future__ import annotations
@@ -133,9 +133,25 @@ KEYS = {
     "total_atendimentos_conc": ["total_de_atendimentos_concluidos", "total_de_atendimentos_concluídos"],
 }
 
+# Mapas para CSVs gravados pela versão 2 (GH_PATH/YYYY-MM/*.csv)
+CSV_TYPE_TO_KIND = {
+    "csat_by_cat": "csat",
+    "csat_avg": "media_csat",
+    "handle_avg": "tma_geral",
+    "wait_avg": "tme_geral",
+    "total": "total_atendimentos",
+    "completed": "total_atendimentos_conc",
+    "by_channel": "by_channel",
+}
+
 
 def detect_kind(filename: str) -> Optional[str]:
     low = filename.lower()
+    # 1) CSVs do app v2 (nomes fixos): by_channel.csv, csat_avg.csv, etc.
+    if low.endswith('.csv'):
+        base = os.path.splitext(os.path.basename(low))[0]
+        return CSV_TYPE_TO_KIND.get(base)
+    # 2) XLSX por palavras-chave
     for kind, tokens in KEYS.items():
         for t in tokens:
             if t in low and low.endswith(".xlsx"):
@@ -221,8 +237,8 @@ def fetch_repo_zip_bytes() -> Optional[bytes]:
 
 def group_zip_files_by_month(zf: ZipFile) -> Dict[str, List[str]]:
     """
-    Dentro do ZIP, encontra todos os .xlsx sob a pasta GH_PATH (recursivo) e agrupa por mês.
-    Se não encontrar AAAA-MM, usa o mês atual (TODAY_MK) como fallback para garantir leitura.
+    Dentro do ZIP, encontra todos os .xlsx/.csv sob a pasta GH_PATH (recursivo) e agrupa por mês.
+    Se não encontrar AAAA-MM, usa o mês atual (TODAY_MK) como fallback.
     """
     names = zf.namelist()
     months: Dict[str, List[str]] = {}
@@ -230,7 +246,8 @@ def group_zip_files_by_month(zf: ZipFile) -> Dict[str, List[str]]:
     base_prefix = f"{root}/{GH_PATH.strip('/')}/" if GH_PATH else f"{root}/"
 
     for n in names:
-        if not n.lower().endswith(".xlsx"):
+        low = n.lower()
+        if not (low.endswith(".xlsx") or low.endswith(".csv")):
             continue
         if base_prefix and not n.startswith(base_prefix):
             continue
@@ -259,10 +276,16 @@ def gh_read_month_payload_from_zip(zf: ZipFile, paths: List[str]) -> dict:
         sel = sorted(lst)[-1]  # pega o "mais novo" pelo nome
         try:
             b = zf.read(sel)
-            df = load_xlsx_from_bytes(b)
+            low = sel.lower()
+            if low.endswith('.xlsx'):
+                df = load_xlsx_from_bytes(b)
+            elif low.endswith('.csv'):
+                df = pd.read_csv(BytesIO(b))
+            else:
+                continue
             payload[kind] = df
-        except Exception:
-            LAST_GH_STATUS.append(f"Falha ao ler XLSX do ZIP: {sel}")
+        except Exception as e:
+            LAST_GH_STATUS.append(f"Falha ao ler arquivo do ZIP: {sel} -> {e}")
     return build_by_channel(payload)
 
 
@@ -296,12 +319,19 @@ def read_local_month_payload(y: int, m: int) -> dict:
     if not os.path.isdir(folder):
         return payload
     for f in os.listdir(folder):
-        if not f.lower().endswith(".xlsx"):
-            continue
-        kind = f.split(".")[0]
+        low = f.lower()
+        path = os.path.join(folder, f)
         try:
-            df = load_xlsx(os.path.join(folder, f))
-            payload[kind] = df
+            if low.endswith(".xlsx"):
+                kind = detect_kind(f) or os.path.splitext(f)[0]
+                df = load_xlsx(path)
+            elif low.endswith(".csv"):
+                kind = detect_kind(f) or os.path.splitext(f)[0]
+                df = pd.read_csv(path)
+            else:
+                continue
+            if kind:
+                payload[kind] = df
         except Exception:
             pass
     return build_by_channel(payload)
@@ -341,8 +371,8 @@ def ingest_single_file(kind: str, fl) -> Optional[pd.DataFrame]:
 # ======================
 
 st.set_page_config(page_title="Dashboard CSAT — GitHub (ZIP) + Upload por arquivo", layout="wide")
-st.title("Dashboard CSAT (XLSX) — Fonte GitHub (ZIP) + Upload por arquivo")
-st.caption(f"Fonte GitHub: **{GH_REPO} / {GH_BRANCH} / {GH_PATH}** — leitura via ZIP (sem /git/trees).")
+st.title("Dashboard CSAT (XLSX/CSV) — Fonte GitHub (ZIP) + Upload por arquivo")
+st.caption(f"Fonte GitHub: **{GH_REPO} / {GH_BRANCH} / {GH_PATH}** — leitura via ZIP.")
 
 # Estado
 if "months" not in st.session_state:
@@ -395,8 +425,8 @@ with st.sidebar:
                     # filtro por GH_PATH
                     root = names[0].split("/")[0] if names else ""
                     base_prefix = f"{root}/{GH_PATH.strip('/')}/" if GH_PATH else f"{root}/"
-                    in_path = [n for n in names if n.startswith(base_prefix) and n.lower().endswith('.xlsx')]
-                    st.write(f"Arquivos .xlsx encontrados sob GH_PATH: **{len(in_path)}**")
+                    in_path = [n for n in names if n.startswith(base_prefix) and (n.lower().endswith('.xlsx') or n.lower().endswith('.csv'))]
+                    st.write(f"Arquivos (.xlsx/.csv) encontrados sob GH_PATH: **{len(in_path)}**")
                     grouped = group_zip_files_by_month(zf)
                     st.write(f"Meses mapeados: {sorted(grouped.keys())}")
 
