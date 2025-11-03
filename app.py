@@ -659,7 +659,7 @@ normalize_pct = st.sidebar.checkbox("Normalizar distribuição CSAT (percentual)
 st.title("Dashboard CSAT Mensal (XLSX) — Persistência GitHub")
 st.caption("Arquivos por mês ficam salvos no repositório GitHub configurado (e em data_store/ como fallback).")
 
-tabs = st.tabs(["Visão Geral", "Por Canal", "Comparativo Mensal", "Dicionário de Dados"])
+tabs = st.tabs(["Visão Geral", "Por Canal", "Comparativo Mensal", "Dicionário de Dados", "Análise dos Canais"])
 
 # 1) Visão Geral
 with tabs[0]:
@@ -749,8 +749,8 @@ with tabs[1]:
         with col3:
             if "_handle_seconds" in dfc.columns:
                 dft = dfc.copy()
-                dft["Tempo médio de atendimento (s)"] = dft["_handle_seconds"]
-                st.plotly_chart(px.bar(dft, x="Canal", y="Tempo médio de atendimento (s)", title="Tempo médio de atendimento (s)"), use_container_width=True)
+                dft["Tempo médio de atendimento (h)"] = dft["_handle_seconds"]
+                st.plotly_chart(px.bar(dft, x="Canal", y="Tempo médio de atendimento (h)", title="Tempo médio de atendimento (h)"), use_container_width=True)
         with col4:
             if "_wait_seconds" in dfc.columns:
                 dft = dfc.copy()
