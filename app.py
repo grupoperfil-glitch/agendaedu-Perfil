@@ -1,25 +1,26 @@
-# app.py — Dashboard CSAT (XLSX) — GitHub + Upload mensal (nomes com timestamp)
-# -----------------------------------------------------------------------------
+# app.py — Dashboard CSAT (XLSX) — GitHub (árvore recursiva) + Upload mensal
+# --------------------------------------------------------------------------
 # Requisitos:
 #   pip install streamlit plotly pandas numpy openpyxl requests
 #
-# Secrets recomendados (Streamlit Cloud / .streamlit/secrets.toml):
-#   GITHUB_DATA_TOKEN   = "ghp_xxx"                         # opcional (evita rate limit)
+# Secrets (opcionais) — .streamlit/secrets.toml:
+#   GITHUB_DATA_TOKEN   = "ghp_xxx"                         # recomendado (evita rate limit)
 #   GITHUB_DATA_REPO    = "grupoperfil-glitch/csat-dashboard-data"
 #   GITHUB_DATA_BRANCH  = "main"
-#   GITHUB_DATA_PATH    = "data"                            # onde estão os .xlsx
+#   GITHUB_DATA_PATH    = "data"
 #
 # O app:
-#  - Lê do GitHub os .xlsx, com ou sem subpastas YYYY-MM, aceitando nomes com timestamps.
-#  - Aceita upload múltiplo mensal (vários .xlsx de uma vez); detecta o tipo pelo nome.
-#  - Converte “Tempo médio de atendimento” para HORAS de forma estrita.
-#  - Traz a aba “Análise dos Canais”.
+#  - Lê TODO o repositório via /git/trees?recursive=1, filtra por GITHUB_DATA_PATH e acha meses (YYYY-MM)
+#    tanto por subpasta quanto por presença no NOME DO ARQUIVO (com timestamp).
+#  - Aceita upload múltiplo mensal; reconhece os arquivos pelas palavras-chave no nome.
+#  - Converte “Tempo médio de atendimento” para HORAS (regra estrita).
+#  - Inclui aba “Análise dos Canais”.
 
 from __future__ import annotations
 import os, re, json, base64
 from io import BytesIO
 from datetime import date
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import requests
 import numpy as np
@@ -43,6 +44,9 @@ GH_TOKEN  = _get_secret("GITHUB_DATA_TOKEN",  "")
 
 LOCAL_STORE_DIR = "data_store"
 GH_API_BASE = "https://api.github.com"
+RAW_BASE    = "https://raw.githubusercontent.com"
+
+LAST_GH_STATUS: List[str] = []  # diagnóstico simples
 
 def ensure_dir(p: str) -> None:
     os.makedirs(p, exist_ok=True)
@@ -90,7 +94,8 @@ def to_hours_strict(series: pd.Series) -> pd.Series:
        - string com ':' => HH:MM:SS => horas
        - numérico => SEMPRE segundos => horas
     """
-    s_str = series.astype(str)
+    s = series.copy()
+    s_str = s.astype(str)
     has_colon = s_str.str.contains(":", regex=False)
     out = pd.Series(index=series.index, dtype="float64")
     # HH:MM:SS
@@ -123,9 +128,9 @@ def detect_kind(filename: str) -> Optional[str]:
                 return kind
     return None
 
-def extract_month_from_name(name: str) -> Optional[str]:
-    # pega a primeira ocorrência de AAAA-MM
-    m = re.search(r"\d{4}-\d{2}", name)
+def extract_month_from_any(s: str) -> Optional[str]:
+    """Extrai a PRIMEIRA ocorrência de AAAA-MM em um caminho ou nome."""
+    m = re.search(r"\d{4}-\d{2}", s)
     return m.group(0) if m else None
 
 # ======================
@@ -134,20 +139,21 @@ def extract_month_from_name(name: str) -> Optional[str]:
 def build_by_channel(payload: dict) -> dict:
     """Monta/atualiza payload['by_channel'] unificando qualquer DF com coluna 'Canal'."""
     dfs = []
-    for k, df in payload.items():
-        if isinstance(df, pd.DataFrame) and "Canal" in normalize_canal_column(df).columns:
-            dfs.append(normalize_canal_column(df.copy()))
+    for _, df in payload.items():
+        if isinstance(df, pd.DataFrame):
+            ndf = normalize_canal_column(df)
+            if "Canal" in ndf.columns:
+                dfs.append(ndf.copy())
 
     merged = None
     for df in dfs:
         merged = df.copy() if merged is None else merged.merge(df, on="Canal", how="outer")
 
-    # Deriva 'Média CSAT' padronizada se existir 'avg'/'media' etc.
     if isinstance(merged, pd.DataFrame):
+        # padroniza nomes comuns
         mcol = find_best_column(merged, ["Média CSAT","media csat","avg","media"])
         if mcol and mcol != "Média CSAT":
             merged = merged.rename(columns={mcol: "Média CSAT"})
-        # Se houverem contagens com nomes diferentes, tenta padronizar
         ccol = find_best_column(merged, [
             "Respostas CSAT","Quantidade de respostas CSAT","score_total","ratings",
             "Total de avaliações","avaliacoes","avaliações","qtd","qtde"
@@ -159,7 +165,7 @@ def build_by_channel(payload: dict) -> dict:
     return payload
 
 # ======================
-# GitHub fetch
+# GitHub: leitura pela ÁRVORE (100% abrangente)
 # ======================
 def gh_headers() -> Dict[str, str]:
     h = {"Accept": "application/vnd.github+json"}
@@ -167,78 +173,96 @@ def gh_headers() -> Dict[str, str]:
         h["Authorization"] = f"token {GH_TOKEN}"
     return h
 
-def gh_list_contents(path: str) -> List[dict]:
-    url = f"{GH_API_BASE}/repos/{GH_REPO}/contents/{path}?ref={GH_BRANCH}"
-    r = requests.get(url, headers=gh_headers(), timeout=30)
-    if r.status_code != 200:
+def gh_list_all_blob_paths() -> List[str]:
+    """Usa /git/trees/{branch}?recursive=1 para listar TODOS os caminhos (type=blob)."""
+    url = f"{GH_API_BASE}/repos/{GH_REPO}/git/trees/{GH_BRANCH}?recursive=1"
+    try:
+        r = requests.get(url, headers=gh_headers(), timeout=60)
+        LAST_GH_STATUS.append(f"GET {url} -> {r.status_code}")
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        tree = data.get("tree", [])
+        return [it["path"] for it in tree if it.get("type") == "blob"]
+    except Exception as e:
+        LAST_GH_STATUS.append(f"ERR trees: {e}")
         return []
-    data = r.json()
-    return data if isinstance(data, list) else []
 
-def gh_download_bytes(download_url: str) -> Optional[bytes]:
-    r = requests.get(download_url, headers=gh_headers(), timeout=60)
-    return r.content if r.status_code == 200 else None
+def raw_download(path: str) -> Optional[bytes]:
+    """Baixa conteúdo via raw.githubusercontent.com (para repositórios públicos)."""
+    url = f"{RAW_BASE}/{GH_REPO}/{GH_BRANCH}/{path}"
+    try:
+        r = requests.get(url, headers=gh_headers(), timeout=60)
+        LAST_GH_STATUS.append(f"GET {url} -> {r.status_code}")
+        if r.status_code != 200:
+            return None
+        return r.content
+    except Exception as e:
+        LAST_GH_STATUS.append(f"ERR raw: {e}")
+        return None
 
-def group_repo_files_by_month() -> Dict[str, List[dict]]:
+def group_repo_files_by_month_via_tree() -> Dict[str, List[str]]:
     """
-    Pesquisa GH_PATH e agrupa arquivos por mês (YYYY-MM), aceitando:
-      - data/YYYY-MM/<arquivos>.xlsx
-      - data/<arquivos_com_YYYY-MM_no_nome>.xlsx
+    Agrupa caminhos de arquivos .xlsx por mês (YYYY-MM), considerando:
+      - subpastas YYYY-MM dentro de GH_PATH
+      - nomes com YYYY-MM
     """
-    out: Dict[str, List[dict]] = {}
-    # 1) lista raiz GH_PATH
-    root_items = gh_list_contents(GH_PATH)
-    for it in root_items:
-        t = it.get("type")
-        name = it.get("name","")
-        if t == "dir":
-            # subpasta; se for YYYY-MM, usa os .xlsx de dentro
-            if re.fullmatch(r"\d{4}-\d{2}", name):
-                month = name
-                for sub in gh_list_contents(f"{GH_PATH}/{name}"):
-                    if sub.get("type") == "file" and sub.get("name","").lower().endswith(".xlsx"):
-                        out.setdefault(month, []).append(sub)
-            else:
-                # pasta livre; se tiver .xlsx com mês no nome, captura
-                for sub in gh_list_contents(f"{GH_PATH}/{name}"):
-                    if sub.get("type") == "file" and sub.get("name","").lower().endswith(".xlsx"):
-                        m = extract_month_from_name(sub.get("name",""))
-                        if m:
-                            out.setdefault(m, []).append(sub)
-        elif t == "file" and name.lower().endswith(".xlsx"):
-            m = extract_month_from_name(name)
+    paths = gh_list_all_blob_paths()
+    out: Dict[str, List[str]] = {}
+    prefix = f"{GH_PATH}/" if GH_PATH else ""
+    for p in paths:
+        if not p.lower().endswith(".xlsx"):
+            continue
+        if GH_PATH and not p.startswith(prefix) and p != GH_PATH:
+            continue
+        # tenta subpasta com mês
+        parts = p.split("/")
+        found_month = None
+        for seg in parts:
+            m = extract_month_from_any(seg)
             if m:
-                out.setdefault(m, []).append(it)
+                found_month = m
+                break
+        if not found_month:
+            found_month = extract_month_from_any(os.path.basename(p))
+        if not found_month:
+            # não conseguimos identificar o mês -> ignora
+            continue
+        out.setdefault(found_month, []).append(p)
     return out
 
-def gh_read_month_payload_from_items(items: List[dict]) -> dict:
+def gh_read_month_payload_from_paths(paths: List[str]) -> dict:
     payload: dict = {}
-    # seleciona o arquivo mais "recente" por tipo (heurística: nome mais longo/lexicograficamente maior)
-    by_kind: Dict[str, List[dict]] = {}
-    for it in items:
-        k = detect_kind(it.get("name",""))
-        if k:
-            by_kind.setdefault(k, []).append(it)
+    by_kind: Dict[str, List[str]] = {}
+    for p in paths:
+        kind = detect_kind(os.path.basename(p))
+        if kind:
+            by_kind.setdefault(kind, []).append(p)
     for kind, lst in by_kind.items():
-        # pega o último por nome (geralmente tem timestamp mais à direita)
-        sel = sorted(lst, key=lambda x: x.get("name",""))[-1]
-        b = gh_download_bytes(sel.get("download_url",""))
+        sel = sorted(lst)[-1]  # heurística simples: escolhe o "maior" nome (geralmente com timestamp mais novo)
+        b = raw_download(sel)
         if b:
-            df = load_xlsx_from_bytes(b)
-            payload[kind] = df
+            try:
+                df = load_xlsx_from_bytes(b)
+                payload[kind] = df
+            except Exception:
+                LAST_GH_STATUS.append(f"Falha ao ler XLSX: {sel}")
     return build_by_channel(payload)
 
-def load_all_github_months_into_state(force: bool = False) -> int:
-    grouped = group_repo_files_by_month()
-    loaded = 0
-    for m, items in sorted(grouped.items()):
+def load_all_github_months_into_state(force: bool = False) -> Tuple[int, int]:
+    """Carrega todos os meses do GitHub. Retorna (#meses, #arquivos)."""
+    grouped = group_repo_files_by_month_via_tree()
+    months_loaded = 0
+    files_count = 0
+    for m, paths in sorted(grouped.items()):
+        files_count += len(paths)
         if not force and m in st.session_state["months"]:
             continue
-        payload = gh_read_month_payload_from_items(items)
+        payload = gh_read_month_payload_from_paths(paths)
         if payload:
             st.session_state["months"][m] = payload
-            loaded += 1
-    return loaded
+            months_loaded += 1
+    return months_loaded, files_count
 
 # ======================
 # Local (fallback)
@@ -299,15 +323,15 @@ def ingest_uploaded_files(files: List) -> Dict[str, pd.DataFrame]:
 # ======================
 st.set_page_config(page_title="Dashboard CSAT — GitHub + Upload", layout="wide")
 st.title("Dashboard CSAT (XLSX) — Fonte GitHub + Upload mensal")
-st.caption(f"Fonte GitHub padrão: **{GH_REPO} / {GH_BRANCH} / {GH_PATH}**. Aceita uploads com nomes contendo palavras-chave e timestamps.")
+st.caption(f"Fonte GitHub: **{GH_REPO} / {GH_BRANCH} / {GH_PATH}**. Busca por árvore recursiva; aceita uploads com nomes contendo palavras-chave e timestamps.")
 
 # Estado
 if "months" not in st.session_state:
     st.session_state["months"] = {}
 
-# Carrega do GitHub na inicialização
-_gh_loaded = load_all_github_months_into_state(force=False)
-_local_loaded = load_all_local_months_into_state()
+# Carrega do GitHub na inicialização (com diagnóstico)
+gh_loaded, gh_files = load_all_github_months_into_state(force=False)
+local_loaded = load_all_local_months_into_state()
 
 # Sidebar
 with st.sidebar:
@@ -318,16 +342,25 @@ with st.sidebar:
     mk = month_key(int(year), int(month))
 
     st.write("---")
-    st.markdown("**Fonte dos dados**")
-    st.write(f"GitHub: `{GH_REPO}` / `{GH_BRANCH}` / `{GH_PATH}`")
+    st.markdown("**Fonte dos dados (GitHub)**")
+    st.write(f"Repo: `{GH_REPO}` / Branch: `{GH_BRANCH}` / Path: `{GH_PATH}`")
     if GH_TOKEN:
-        st.success("Token GitHub detectado.")
+        st.success("Token GitHub detectado (requisições autenticadas).")
     else:
-        st.info("Sem token GitHub: usando requisições públicas.")
+        st.info("Sem token: requisições públicas (60 req/hora).")
 
     if st.button("Recarregar do GitHub (todos os meses)"):
-        loaded = load_all_github_months_into_state(force=True)
-        st.success(f"Recarregados do GitHub: {loaded} mês(es).")
+        LAST_GH_STATUS.clear()
+        loaded, files_cnt = load_all_github_months_into_state(force=True)
+        st.success(f"Recarregados do GitHub: {loaded} mês(es) — {files_cnt} arquivo(s) analisado(s).")
+        if LAST_GH_STATUS:
+            with st.expander("Diagnóstico GitHub (últimas chamadas)"):
+                st.code("\n".join(LAST_GH_STATUS[-15:]))
+
+    with st.expander("Diagnóstico inicial (GitHub)"):
+        st.write(f"Meses carregados agora: **{gh_loaded}** | Arquivos vistoriados: **{gh_files}** | Fallback local: **{local_loaded}**")
+        if LAST_GH_STATUS:
+            st.code("\n".join(LAST_GH_STATUS[-15:]))
 
     st.write("---")
     st.subheader("Upload mensal (.xlsx)")
@@ -336,7 +369,6 @@ with st.sidebar:
     if ups:
         st.caption("Opcional: informe o **mês** desses arquivos (YYYY-MM). Se não informar, uso o mês atual.")
         up_month = st.text_input("Mês destino (YYYY-MM)", value=mk)
-
         if st.button("Carregar arquivos enviados neste mês"):
             partial = ingest_uploaded_files(ups)
             if not partial:
@@ -350,8 +382,7 @@ with st.sidebar:
                 folder = os.path.join(LOCAL_STORE_DIR, up_month)
                 ensure_dir(folder)
                 for kind, df in partial.items():
-                    fname = f"{kind}.xlsx"
-                    df.to_excel(os.path.join(folder, fname), index=False)
+                    df.to_excel(os.path.join(folder, f"{kind}.xlsx"), index=False)
                 st.success(f"{len(partial)} arquivo(s) anexado(s) ao mês {up_month} e salvo(s) em disco.")
 
 # Helper
@@ -382,25 +413,26 @@ with tabs[0]:
         with cols[0]:
             df = payload.get("total_atendimentos")
             if isinstance(df, pd.DataFrame) and not df.empty:
-                st.metric("Total de Atendimentos (arquivo)", int(pd.to_numeric(df.select_dtypes(include=[np.number]), errors="coerce").sum().sum()))
+                v = int(pd.to_numeric(df.select_dtypes(include=[np.number]), errors="coerce").sum().sum())
+                st.metric("Total de Atendimentos (arquivo)", v)
         with cols[1]:
             df = payload.get("total_atendimentos_conc")
             if isinstance(df, pd.DataFrame) and not df.empty:
-                st.metric("Atendimentos Concluídos (arquivo)", int(pd.to_numeric(df.select_dtypes(include=[np.number]), errors="coerce").sum().sum()))
+                v = int(pd.to_numeric(df.select_dtypes(include=[np.number]), errors="coerce").sum().sum())
+                st.metric("Atendimentos Concluídos (arquivo)", v)
         with cols[2]:
             df = payload.get("tma_geral")
             if isinstance(df, pd.DataFrame) and not df.empty:
-                # tenta uma coluna de tempo
                 tcol = find_best_column(df, ["mean_total HH:MM:SS","mean_total","Tempo médio de atendimento","tempo medio de atendimento"])
                 if tcol:
                     v = to_hours_strict(df[tcol]).mean()
                     st.metric("Tempo médio de atendimento (h) — geral", f"{v:.2f}")
 
         st.write("### Tabelas disponíveis no mês")
-        for k, v in payload.items():
-            if isinstance(v, pd.DataFrame):
+        for k, vdf in payload.items():
+            if isinstance(vdf, pd.DataFrame):
                 st.markdown(f"**{k}**")
-                st.dataframe(v.head(50), use_container_width=True)
+                st.dataframe(vdf.head(50), use_container_width=True)
 
 # 2) Por Canal
 with tabs[1]:
@@ -489,7 +521,7 @@ with tabs[3]:
 # 5) Análise dos Canais
 with tabs[4]:
     st.subheader("Análise dos Canais")
-    st.caption("Exibe, por mês, os canais com MENOR quantidade de respostas de CSAT (se disponível) e as MENORES notas de CSAT.")
+    st.caption("Exibe, por mês, os canais com MENOR quantidade de respostas do CSAT (se disponível) e as MENORES notas de CSAT.")
 
     months_dict = st.session_state["months"]
     if not months_dict:
