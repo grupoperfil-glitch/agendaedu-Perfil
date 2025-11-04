@@ -579,9 +579,13 @@ with st.sidebar:
                 with ZipFile(BytesIO(btest)) as zf:
                     names = zf.namelist()
                     st.write(f"Entradas no ZIP: **{len(names)}**. Prefixo esperado: `{GH_PATH}`")
-                    st.code("\\n".join(names[:200]))
+                    _log_names = "
+".join(names[:200])
+st.code(_log_names)
         if LAST_GH_STATUS:
-            st.code("\\n".join(LAST_GH_STATUS[-20:]))
+            _log_tail = "
+".join(LAST_GH_STATUS[-20:])
+st.code(_log_tail)
 
     st.write("---")
     st.subheader("Upload por arquivo (.xlsx/.csv)")
