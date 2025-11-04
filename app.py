@@ -339,23 +339,27 @@ def build_by_channel(payload: dict) -> dict:
 # ======================
 
 def fetch_repo_zip_bytes() -> Optional[bytes]:
-    """Tenta API zipball (se houver token), senão codeload."""
+    """Tenta API zipball (se houver token), senão codeload (com headers)"""
+    headers = {
+        "User-Agent": "streamlit-csat-dashboard",
+    }
+    if GH_TOKEN:
+        headers["Authorization"] = f"token {GH_TOKEN}"
     # 1) API zipball
     try:
-        headers = {}
-        if GH_TOKEN:
-            headers["Authorization"] = f"token {GH_TOKEN}"
         api_zip_url = f"https://api.github.com/repos/{GH_REPO}/zipball/{GH_BRANCH}"
         r = requests.get(api_zip_url, headers=headers, timeout=120, allow_redirects=True)
         LAST_GH_STATUS.append(f"GET {api_zip_url} -> {r.status_code}")
         if r.status_code == 200 and r.content:
             return r.content
+        if r.status_code in (301, 302):
+            LAST_GH_STATUS.append("zipball redirect seguido")
     except Exception as e:
         LAST_GH_STATUS.append(f"ERR API ZIP: {e}")
-    # 2) Fallback: codeload
+    # 2) Fallback: codeload (também com headers para privados)
     try:
         raw_zip_url = f"https://codeload.github.com/{GH_REPO}/zip/refs/heads/{GH_BRANCH}"
-        r = requests.get(raw_zip_url, timeout=120)
+        r = requests.get(raw_zip_url, headers=headers, timeout=120, allow_redirects=True)
         LAST_GH_STATUS.append(f"GET {raw_zip_url} -> {r.status_code}")
         if r.status_code == 200 and r.content:
             return r.content
@@ -368,23 +372,47 @@ def group_zip_files_by_month(zf: ZipFile) -> Dict[str, List[str]]:
     names = zf.namelist()
     months: Dict[str, List[str]] = {}
     root = names[0].split("/")[0] if names else ""
-    base_prefix = f"{root}/{GH_PATH.strip('/')}/" if GH_PATH else f"{root}/"
-    for n in names:
-        low = n.lower()
-        if not (low.endswith(".xlsx") or low.endswith(".csv")):
-            continue
-        if base_prefix and not n.startswith(base_prefix):
-            continue
-        month = None
-        for seg in n.split("/"):
-            m = extract_month_from_any(seg)
-            if m:
-                month = m
-                break
-        if not month:
-            month = extract_month_from_any(os.path.basename(n)) or TODAY_MK
-        months.setdefault(month, []).append(n)
-    return months
+    # prefixo "estrito" (como antes)
+    strict_prefix = f"{root}/{GH_PATH.strip('/')}/" if GH_PATH else f"{root}/"
+
+    def _collect(filter_func):
+        out: Dict[str, List[str]] = {}
+        for n in names:
+            low = n.lower()
+            if not (low.endswith(".xlsx") or low.endswith(".csv")):
+                continue
+            if not filter_func(n, low):
+                continue
+            month = None
+            for seg in n.split("/"):
+                m = extract_month_from_any(seg)
+                if m:
+                    month = m
+                    break
+            if not month:
+                month = extract_month_from_any(os.path.basename(n)) or TODAY_MK
+            out.setdefault(month, []).append(n)
+        return out
+
+    # 1) tentar estrito (startswith)
+    grouped = _collect(lambda n, low: (not strict_prefix) or n.startswith(strict_prefix))
+
+    # 2) se nada encontrado e GH_PATH definido, tentar "solto" (case-insensitive, contendo /path/ em qualquer lugar)
+    if not grouped and GH_PATH:
+        needle = f"/{GH_PATH.strip('/').lower()}/"
+        grouped = _collect(lambda n, low: needle in low)
+        if grouped:
+            LAST_GH_STATUS.append(f"Fallback de caminho aplicado (contendo '{needle}')")
+
+    # 3) se ainda nada, pegar QUALQUER .xlsx/.csv do repo
+    if not grouped:
+        grouped = _collect(lambda n, low: True)
+        LAST_GH_STATUS.append("Fallback amplo: varrendo todo o ZIP")
+
+    # log rápido
+    files_count = sum(len(v) for v in grouped.values())
+    LAST_GH_STATUS.append(f"ZIP scan -> meses: {len(grouped)} | arquivos úteis: {files_count} | GH_PATH='{GH_PATH}'")
+    return grouped
 
 
 def gh_read_file_from_zip(zf: ZipFile, path: str) -> Optional[pd.DataFrame]:
