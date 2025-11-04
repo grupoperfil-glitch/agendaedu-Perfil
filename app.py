@@ -5,20 +5,21 @@
 #
 # Secrets (opcionais) — .streamlit/secrets.toml:
 #   GITHUB_DATA_TOKEN   = "ghp_xxx"                         # opcional (evita alguns limites)
-#   GITHUB_DATA_REPO    = "owner/repo"                     # ex.: "grupoperfil-glitch/csat-dashboard-data"
+#   GITHUB_DATA_REPO    = "grupoperfil-glitch/csat-dashboard-data"
 #   GITHUB_DATA_BRANCH  = "main"
 #   GITHUB_DATA_PATH    = "data"                            # subpasta contendo os .xlsx/.csv (ex.: data/2025-09/...)
 #
-# O app atende aos requisitos pedidos:
+# Funcionalidades:
 #  - Visão Geral: APENAS 4 indicadores (SLA) + 1 gráfico de distribuição do CSAT do mês (ordem crescente de satisfação).
-#  - Por Canal: TMA (h) e TME (h) com multiselect de canais.
+#  - Por Canal: TMA (h) e TME (h) com multiselect de canais + CSAT médio por canal filtrado.
 #  - Comparativo Mensal: 4 gráficos (um por indicador) ao longo do ano selecionado.
-#  - Análise dos Canais: (1) distribuição do CSAT apenas dos canais com média < 4; (2) cobertura de avaliação (%) por canal com filtro.
 #  - Upload por arquivo (um campo para cada tipo).
 #  - Leitura robusta do GitHub via ZIP (API zipball → fallback codeload), suportando .xlsx e .csv.
+#  - Diagnóstico com listagem do ZIP + self-tests dos utilitários.
 
 from __future__ import annotations
-import os, re
+import os
+import re
 from io import BytesIO
 from datetime import date
 from typing import Dict, List, Optional, Tuple
@@ -533,6 +534,27 @@ def ingest_single_file(file, expected_kind: str) -> Optional[pd.DataFrame]:
 
 
 # ======================
+# Self-tests (básicos)
+# ======================
+
+def _run_self_tests() -> str:
+    msgs = []
+    # extract_month_from_any
+    assert extract_month_from_any("data/2025-02/file.xlsx") == "2025-02"
+    assert extract_month_from_any("2024_12_relatorio.csv") == "2024-12"
+    # to_hours_strict
+    hs = to_hours_strict(pd.Series(["01:00:00", "1800"]))  # 1h e 1800s=0.5h
+    assert abs(hs.iloc[0] - 1.0) < 1e-6 and abs(hs.iloc[1] - 0.5) < 1e-6
+    # normalize_canal_column (não deve renomear 'Categoria')
+    df1 = pd.DataFrame({"canal": ["A"], "x": [1]})
+    df2 = pd.DataFrame({"Categoria": ["Neutro"], "score_total": [10]})
+    assert "Canal" in normalize_canal_column(df1).columns
+    assert "Canal" not in normalize_canal_column(df2).columns
+    msgs.append("OK: 4 testes básicos")
+    return "\n".join(msgs)
+
+
+# ======================
 # Streamlit App
 # ======================
 
@@ -579,13 +601,17 @@ with st.sidebar:
                 with ZipFile(BytesIO(btest)) as zf:
                     names = zf.namelist()
                     st.write(f"Entradas no ZIP: **{len(names)}**. Prefixo esperado: `{GH_PATH}`")
-                    _log_names = "
-".join(names[:200])
+                    _log_names = "\n".join(names[:200])
                     st.code(_log_names)
         if LAST_GH_STATUS:
-            _log_tail = "
-".join(LAST_GH_STATUS[-20:])
+            _log_tail = "\n".join(LAST_GH_STATUS[-20:])
             st.code(_log_tail)
+        if st.button("Rodar self-tests", key="selftests"):
+            try:
+                res = _run_self_tests()
+                st.success(res)
+            except AssertionError as e:
+                st.error(f"Self-tests falharam: {e}")
 
     st.write("---")
     st.subheader("Upload por arquivo (.xlsx/.csv)")
@@ -601,26 +627,33 @@ with st.sidebar:
     if st.button("Salvar arquivos do mês atual"):
         payload = st.session_state["months"].get(mk, {})
         if u_csat:
-            df = ingest_single_file(u_csat, "csat");
-            if isinstance(df, pd.DataFrame): payload["csat"] = df
+            df = ingest_single_file(u_csat, "csat")
+            if isinstance(df, pd.DataFrame):
+                payload["csat"] = df
         if u_media:
-            df = ingest_single_file(u_media, "media_csat");
-            if isinstance(df, pd.DataFrame): payload["media_csat"] = df
+            df = ingest_single_file(u_media, "media_csat")
+            if isinstance(df, pd.DataFrame):
+                payload["media_csat"] = df
         if u_tma:
-            df = ingest_single_file(u_tma, "tma_geral");
-            if isinstance(df, pd.DataFrame): payload["tma_geral"] = df
+            df = ingest_single_file(u_tma, "tma_geral")
+            if isinstance(df, pd.DataFrame):
+                payload["tma_geral"] = df
         if u_tme:
-            df = ingest_single_file(u_tme, "tme_geral");
-            if isinstance(df, pd.DataFrame): payload["tme_geral"] = df
+            df = ingest_single_file(u_tme, "tme_geral")
+            if isinstance(df, pd.DataFrame):
+                payload["tme_geral"] = df
         if u_total:
-            df = ingest_single_file(u_total, "total_atendimentos");
-            if isinstance(df, pd.DataFrame): payload["total_atendimentos"] = df
+            df = ingest_single_file(u_total, "total_atendimentos")
+            if isinstance(df, pd.DataFrame):
+                payload["total_atendimentos"] = df
         if u_total_c:
-            df = ingest_single_file(u_total_c, "total_atendimentos_conc");
-            if isinstance(df, pd.DataFrame): payload["total_atendimentos_conc"] = df
+            df = ingest_single_file(u_total_c, "total_atendimentos_conc")
+            if isinstance(df, pd.DataFrame):
+                payload["total_atendimentos_conc"] = df
         if u_ch:
-            df = ingest_single_file(u_ch, "tma_por_canal");
-            if isinstance(df, pd.DataFrame): payload["tma_por_canal"] = df
+            df = ingest_single_file(u_ch, "tma_por_canal")
+            if isinstance(df, pd.DataFrame):
+                payload["tma_por_canal"] = df
         payload = build_by_channel(payload)
         st.session_state["months"][mk] = payload
         # salva local simples (CSV quando possível)
@@ -700,7 +733,7 @@ with tabs[0]:
         else:
             st.info("Arquivo de distribuição de CSAT do mês não encontrado (ex.: _data_product__csat_*.xlsx ou csat_by_cat.csv).")
 
-# 2) Por Canal — TMA/TME em horas + multiselect de canais
+# 2) Por Canal — TMA/TME em horas + multiselect de canais + CSAT médio
 with tabs[1]:
     st.subheader(f"Por Canal — {mk}")
     dfc = get_current_by_channel(mk)
@@ -822,5 +855,3 @@ with tabs[3]:
 **CSAT (distribuição do mês)**: `Categoria` + `score_total` (ou `total`, `count`, `ratings`).
 """
     )
-
-
