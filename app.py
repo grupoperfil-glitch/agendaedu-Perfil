@@ -305,7 +305,7 @@ def detect_kind(filename: str) -> Optional[str]:
 
 
 def extract_month_from_any(s: str) -> Optional[str]:
-    m = re.search(r"(20\\d{2})[-_./ ](0[1-9]|1[0-2])", s)
+    m = re.search(r"(20\d{2})[-_./ ](0[1-9]|1[0-2])", s)
     return f"{m.group(1)}-{m.group(2)}" if m else None
 
 
@@ -479,7 +479,7 @@ def load_all_local_months_into_state() -> int:
     loaded = 0
     for name in sorted(os.listdir(LOCAL_STORE_DIR)):
         p = os.path.join(LOCAL_STORE_DIR, name)
-        if os.path.isdir(p) and re.fullmatch(r"\\d{4}-\\d{2}", name):
+        if os.path.isdir(p) and re.fullmatch(r"\d{4}-\d{2}", name):
             payload = read_local_month_payload(name)
             if payload and name not in st.session_state["months"]:
                 st.session_state["months"][name] = payload
@@ -542,7 +542,8 @@ with st.sidebar:
     with st.expander("Diagnóstico GitHub"):
         st.write(f"Meses carregados agora: **{gh_loaded}** | Arquivos vistoriados: **{gh_files}** | Fallback local: **{local_loaded}**")
         if LAST_GH_STATUS:
-            st.code("\n".join(LAST_GH_STATUS[-12:]))
+            st.code("
+".join(LAST_GH_STATUS[-12:]))
 
     st.write("---")
     st.subheader("Upload por arquivo (.xlsx/.csv)")
