@@ -542,8 +542,7 @@ with st.sidebar:
     with st.expander("Diagnóstico GitHub"):
         st.write(f"Meses carregados agora: **{gh_loaded}** | Arquivos vistoriados: **{gh_files}** | Fallback local: **{local_loaded}**")
         if LAST_GH_STATUS:
-            st.code("
-".join(LAST_GH_STATUS[-12:]))
+            st.code("\n".join(LAST_GH_STATUS[-12:]))
 
     st.write("---")
     st.subheader("Upload por arquivo (.xlsx/.csv)")
@@ -609,7 +608,7 @@ def get_current_by_channel(mk: str) -> Optional[pd.DataFrame]:
 
 # ========= Abas =========
 
-tabs = st.tabs(["Visão Geral", "Por Canal", "Comparativo Mensal", "Dicionário de Dados", "Análise dos Canais"])
+tabs = st.tabs(["Visão Geral", "Por Canal", "Comparativo Mensal", "Dicionário de Dados"])
 
 # 1) Visão Geral — apenas indicadores + distribuição do CSAT (mês)
 with tabs[0]:
@@ -705,6 +704,21 @@ with tabs[1]:
                     use_container_width=True
                 )
 
+        # CSAT médio por canal (filtrado pelo multiselect acima)
+        csat_candidates = [
+            "Média CSAT","media csat","avg","media","CSAT","csat","CSAT Médio","csat médio"
+        ]
+        csat_col = find_best_column(dfc, csat_candidates)
+        if csat_col is None:
+            st.info("Coluna de CSAT por canal não localizada neste mês.")
+        else:
+            dfa = dfc.copy()
+            dfa["CSAT médio"] = pd.to_numeric(dfa[csat_col], errors="coerce")
+            st.plotly_chart(
+                px.bar(dfa, x="Canal", y="CSAT médio", title="CSAT médio por canal"),
+                use_container_width=True
+            )
+
 # 3) Comparativo Mensal — 4 indicadores ao longo do ano
 with tabs[2]:
     st.subheader("Comparativo Mensal — indicadores principais")
@@ -766,140 +780,4 @@ with tabs[3]:
 """
     )
 
-# 5) Análise dos Canais — mês atual
-with tabs[4]:
-    st.subheader("Análise dos Canais (mês atual)")
-    st.caption("(1) Distribuição do CSAT para canais com média < 4 e (2) Cobertura de avaliação por canal (%).")
 
-    payload = st.session_state["months"].get(mk, {})
-    dfc = get_current_by_channel(mk)
-    if not isinstance(dfc, pd.DataFrame) or dfc.empty:
-        st.info("Sem dados por canal para o mês selecionado.")
-    else:
-        dfc = normalize_canal_column(dfc.copy())
-        colmap = {str(c).strip().lower(): c for c in dfc.columns}
-        csat_candidates = ["Média CSAT","media csat","avg","media"]
-        count_candidates = [
-            "Respostas CSAT","Quantidade de respostas CSAT","qtd respostas csat","qtd csat",
-            "Respostas","Avaliadas","Avaliações","Total de avaliações",
-            "Ratings","score_total","qtde","qtd"
-        ]
-        concluded_candidates = [
-            "Total de atendimentos concluídos","concluidos","concluídos","atendimentos concluidos","atendimentos concluídos"
-        ]
-
-        csat_col = None
-        for c in csat_candidates:
-            if c.lower() in colmap:
-                csat_col = colmap[c.lower()]
-                break
-
-        # 1) Distribuição de CSAT por canal (apenas canais com média < 4)
-        st.markdown("#### 1) Distribuição de CSAT por canal (apenas canais com média < 4)")
-        if csat_col is None:
-            st.warning("Não encontrei coluna de 'Média CSAT' nos dados por canal deste mês.")
-        else:
-            low = dfc[["Canal", csat_col]].copy()
-            low[csat_col] = pd.to_numeric(low[csat_col], errors="coerce")
-            low = low.dropna()
-            low = low[low[csat_col] < 4.0]
-            low_channels = sorted(low["Canal"].astype(str).unique())
-            if len(low_channels) == 0:
-                st.info("Nenhum canal com média CSAT abaixo de 4 neste mês.")
-            else:
-                dist_df = None
-                # tentar encontrar dataset de distribuição por canal dentro do payload do mês
-                def find_channel_csat_distribution(payload: dict) -> Optional[pd.DataFrame]:
-                    # Formato 1 (longo)
-                    count_candidates_local = [
-                        "score_total", "Respostas CSAT", "Total de avaliações", "ratings", "qtd", "qtde", "count", "total"
-                    ]
-                    for name, df in payload.items():
-                        if not isinstance(df, pd.DataFrame) or df.empty:
-                            continue
-                        cols = {str(c).strip().lower(): c for c in df.columns}
-                        if "canal" in cols and ("categoria" in cols or "category" in cols):
-                            for cc in count_candidates_local:
-                                if cc.lower() in cols:
-                                    out = df[[cols["canal"], cols.get("categoria", cols.get("category")), cols[cc.lower()]]].copy()
-                                    out.columns = ["Canal", "Categoria", "Valor"]
-                                    out["Valor"] = pd.to_numeric(out["Valor"], errors="coerce")
-                                    out = out.dropna()
-                                    return out
-                    # Formato 2 (largo)
-                    for name, df in payload.items():
-                        if not isinstance(df, pd.DataFrame) or df.empty:
-                            continue
-                        cols = {str(c).strip().lower(): c for c in df.columns}
-                        if "canal" not in cols:
-                            continue
-                        cat_map = {}
-                        for cat in CSAT_ORDER:
-                            lowc = cat.strip().lower()
-                            if lowc in cols:
-                                cat_map[cat] = cols[lowc]
-                        if cat_map:
-                            melt_df = df[[cols["canal"]] + list(cat_map.values())].copy()
-                            melt_df = melt_df.melt(id_vars=[cols["canal"]], var_name="Categoria", value_name="Valor")
-                            inv = {v: k for k, v in cat_map.items()}
-                            melt_df["Categoria"] = melt_df["Categoria"].map(inv).fillna(melt_df["Categoria"])
-                            melt_df.columns = ["Canal", "Categoria", "Valor"]
-                            melt_df["Valor"] = pd.to_numeric(melt_df["Valor"], errors="coerce")
-                            melt_df = melt_df.dropna()
-                            return melt_df
-                    return None
-                dist_df = find_channel_csat_distribution(payload)
-                if dist_df is None:
-                    st.warning("Não encontrei distribuição de CSAT por canal (esperado: colunas 'Canal' + 'Categoria' + contagem, ou colunas por categoria por canal). Exibindo apenas médias como fallback.")
-                    fig1 = px.bar(low.sort_values(csat_col), x="Canal", y=csat_col, title="Médias CSAT dos canais < 4")
-                    fig1.update_layout(xaxis_title="", yaxis_title="Média CSAT")
-                    st.plotly_chart(fig1, use_container_width=True)
-                else:
-                    dist_low = dist_df[dist_df["Canal"].astype(str).isin(low_channels)].copy()
-                    if dist_low.empty:
-                        st.info("Sem linhas de distribuição para os canais abaixo de 4.")
-                    else:
-                        dist_low["Categoria"] = dist_low["Categoria"].astype(str)
-                        order = [c for c in CSAT_ORDER if c in dist_low["Categoria"].unique().tolist()]
-                        if order:
-                            dist_low["Categoria"] = pd.Categorical(dist_low["Categoria"], categories=order, ordered=True)
-                            dist_low = dist_low.sort_values(["Canal", "Categoria"])
-                        fig1 = px.bar(
-                            dist_low, x="Canal", y="Valor", color="Categoria",
-                            title="Distribuição do CSAT por canal (canais com média < 4)", barmode="stack"
-                        )
-                        if order:
-                            fig1.update_xaxes(categoryorder='array', categoryarray=order)
-                        fig1.update_layout(xaxis_title="", yaxis_title="Avaliações")
-                        st.plotly_chart(fig1, use_container_width=True)
-
-        st.markdown("---")
-        # 2) Cobertura de avaliação por canal (%)
-        st.markdown("#### 2) Cobertura de avaliação por canal (%)")
-        ccol = None
-        for c in count_candidates:
-            if c.lower() in colmap:
-                ccol = colmap[c.lower()]; break
-        concl_col = None
-        for c in concluded_candidates:
-            if c.lower() in colmap:
-                concl_col = colmap[c.lower()]; break
-        if ccol is None or concl_col is None:
-            st.info("Para cobertura por canal, preciso de 'Respostas CSAT' e 'Total de atendimentos concluídos' no mesmo dataset por canal.")
-        else:
-            cov = dfc[["Canal", ccol, concl_col]].copy()
-            cov[ccol] = pd.to_numeric(cov[ccol], errors='coerce')
-            cov[concl_col] = pd.to_numeric(cov[concl_col], errors='coerce')
-            cov = cov.dropna()
-            cov = cov[cov[concl_col] > 0]
-            cov["Cobertura (%)"] = (cov[ccol] / cov[concl_col]) * 100.0
-            canais = sorted(cov["Canal"].astype(str).unique())
-            sel_channels = st.multiselect("Escolha os canais", canais, default=canais, key="sel_cov_channels")
-            if sel_channels:
-                cov = cov[cov["Canal"].astype(str).isin(sel_channels)]
-            if cov.empty:
-                st.info("Sem dados após o filtro de canais.")
-            else:
-                fig2 = px.bar(cov, x="Canal", y="Cobertura (%)", title="Cobertura de avaliação (Respostas CSAT / Concluídos)")
-                fig2.update_layout(xaxis_title="", yaxis_title="%")
-                st.plotly_chart(fig2, use_container_width=True)
