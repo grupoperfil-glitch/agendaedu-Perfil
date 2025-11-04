@@ -579,14 +579,12 @@ with st.sidebar:
                 with ZipFile(BytesIO(btest)) as zf:
                     names = zf.namelist()
                     st.write(f"Entradas no ZIP: **{len(names)}**. Prefixo esperado: `{GH_PATH}`")
-                    st.code("
-".join(names[:200]))
+                    st.code("\\n".join(names[:200]))
         if LAST_GH_STATUS:
-            st.code("
-".join(LAST_GH_STATUS[-20:]))
+            st.code("\\n".join(LAST_GH_STATUS[-20:]))
 
     st.write("---")
-    st.subheader("Upload por arquivo (.xlsx/.csv)") (.xlsx/.csv)")
+    st.subheader("Upload por arquivo (.xlsx/.csv)")
     st.caption("Preencha os arquivos do **mês selecionado** (acima) — como no app v2.")
     u_csat      = st.file_uploader("1) _data_product__csat_*.xlsx/.csv (Categoria, score_total)", type=["xlsx","csv"], key="u_csat")
     u_media     = st.file_uploader("2) _data_product__media_csat_*.xlsx/.csv (avg)", type=["xlsx","csv"], key="u_media")
