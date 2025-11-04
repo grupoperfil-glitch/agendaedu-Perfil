@@ -578,9 +578,13 @@ with st.sidebar:
             else:
                 with ZipFile(BytesIO(btest)) as zf:
                     names = zf.namelist()
-                    st.write(f"Entradas no ZIP: **{len(names)}**. Prefixo esperado: `{GH_PATH}`")                    _log_names = "\n".join(names[:200])
+                    st.write(f"Entradas no ZIP: **{len(names)}**. Prefixo esperado: `{GH_PATH}`")
+                    _log_names = "
+".join(names[:200])
                     st.code(_log_names)
-        if LAST_GH_STATUS:            _log_tail = "\n".join(LAST_GH_STATUS[-20:])
+        if LAST_GH_STATUS:
+            _log_tail = "
+".join(LAST_GH_STATUS[-20:])
             st.code(_log_tail)
 
     st.write("---")
