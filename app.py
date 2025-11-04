@@ -85,7 +85,8 @@ def normalize_canal_column(df: pd.DataFrame) -> pd.DataFrame:
     if "Canal" in df.columns:
         return df
     lower = {str(c).strip().lower(): c for c in df.columns}
-    for alias in ["categoria", "canal", "channel", "categoria/canal"]:
+    # Importante: NÃO mapear "categoria" para "Canal" (evita confundir distribuição CSAT por categoria com canais)
+    for alias in ["canal", "channel", "categoria/canal"]:
         if alias in lower:
             return df.rename(columns={lower[alias]: "Canal"})
     return df
@@ -374,6 +375,7 @@ def group_zip_files_by_month(zf: ZipFile) -> Dict[str, List[str]]:
     root = names[0].split("/")[0] if names else ""
     # prefixo "estrito" (como antes)
     strict_prefix = f"{root}/{GH_PATH.strip('/')}/" if GH_PATH else f"{root}/"
+    prefix_low = strict_prefix.lower()
 
     def _collect(filter_func):
         out: Dict[str, List[str]] = {}
@@ -394,8 +396,8 @@ def group_zip_files_by_month(zf: ZipFile) -> Dict[str, List[str]]:
             out.setdefault(month, []).append(n)
         return out
 
-    # 1) tentar estrito (startswith)
-    grouped = _collect(lambda n, low: (not strict_prefix) or n.startswith(strict_prefix))
+    # 1) tentar estrito (startswith) — case-insensitive
+    grouped = _collect(lambda n, low: (not strict_prefix) or low.startswith(prefix_low))
 
     # 2) se nada encontrado e GH_PATH definido, tentar "solto" (case-insensitive, contendo /path/ em qualquer lugar)
     if not grouped and GH_PATH:
@@ -411,7 +413,7 @@ def group_zip_files_by_month(zf: ZipFile) -> Dict[str, List[str]]:
 
     # log rápido
     files_count = sum(len(v) for v in grouped.values())
-    LAST_GH_STATUS.append(f"ZIP scan -> meses: {len(grouped)} | arquivos úteis: {files_count} | GH_PATH='{GH_PATH}'")
+    LAST_GH_STATUS.append(f"ZIP scan -> meses: {len(grouped)} | arquivos úteis: {files_count} | GH_PATH='{GH_PATH}' | prefix='{strict_prefix}'")
     return grouped
 
 
@@ -569,11 +571,22 @@ with st.sidebar:
 
     with st.expander("Diagnóstico GitHub"):
         st.write(f"Meses carregados agora: **{gh_loaded}** | Arquivos vistoriados: **{gh_files}** | Fallback local: **{local_loaded}**")
+        if st.button("Listar nomes do ZIP (amostra)", key="list_zip"):
+            btest = fetch_repo_zip_bytes()
+            if not btest:
+                st.warning("Não foi possível baixar o ZIP do GitHub.")
+            else:
+                with ZipFile(BytesIO(btest)) as zf:
+                    names = zf.namelist()
+                    st.write(f"Entradas no ZIP: **{len(names)}**. Prefixo esperado: `{GH_PATH}`")
+                    st.code("
+".join(names[:200]))
         if LAST_GH_STATUS:
-            st.code("\n".join(LAST_GH_STATUS[-12:]))
+            st.code("
+".join(LAST_GH_STATUS[-20:]))
 
     st.write("---")
-    st.subheader("Upload por arquivo (.xlsx/.csv)")
+    st.subheader("Upload por arquivo (.xlsx/.csv)") (.xlsx/.csv)")
     st.caption("Preencha os arquivos do **mês selecionado** (acima) — como no app v2.")
     u_csat      = st.file_uploader("1) _data_product__csat_*.xlsx/.csv (Categoria, score_total)", type=["xlsx","csv"], key="u_csat")
     u_media     = st.file_uploader("2) _data_product__media_csat_*.xlsx/.csv (avg)", type=["xlsx","csv"], key="u_media")
