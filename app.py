@@ -1,189 +1,399 @@
-# app.py — Dashboard CSAT — FUNCIONA COM SEUS ARQUIVOS REAIS
-# Testado com os 7 CSVs que você enviou
+# app.py — Dashboard CSAT (CSV) — MESMAS ABAS E GRÁFICOS DO ORIGINAL
+# Adaptado do código da outra empresa → CSV + seus 7 arquivos reais
 
-import os
-from io import BytesIO, StringIO
-from datetime import date
-from typing import Optional, Dict
-import pandas as pd
-import plotly.express as px
 import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import re
+import os
+import shutil
+from io import BytesIO
+from zipfile import ZipFile
+from datetime import date
 
-# ====================== Config ======================
-LOCAL_STORE_DIR = "data_store"
-os.makedirs(LOCAL_STORE_DIR, exist_ok=True)
+# ====================== CONFIG ======================
+DATA_DIR = "data_store"
+os.makedirs(DATA_DIR, exist_ok=True)
 
+SLA = {
+    "WAITING_TIME_MAX_HOURS": 24,
+    "CSAT_MIN": 4.0,
+    "COMPLETION_RATE_MIN": 90.0,
+    "EVAL_COVERAGE_MIN": 75.0,
+    "NEAR_RATIO": 0.05
+}
+
+CSAT_ORDER = ["Muito Insatisfeito", "Insatisfeito", "Neutro", "Satisfeito", "Muito Satisfeito"]
+
+FILE_PATTERNS = {
+    "csat_by_cat": r"_data_product__csat_.*\.csv$",
+    "csat_avg": r"_data_product__media_csat_.*\.csv$",
+    "handle_avg": r"tempo_medio_de_atendimento_.*\.csv$",
+    "wait_avg": r"tempo_medio_de_espera_.*\.csv$",
+    "total": r"total_de_atendimentos_.*\.csv$",
+    "completed": r"total_de_atendimentos_concluidos_.*\.csv$",
+    "by_channel": r"tempo_medio_de_atendimento_por_canal_.*\.csv$",
+}
+
+EXPECTED_SCHEMAS = {
+    "csat_by_cat": {"Categoria", "score_total"},
+    "csat_avg": {"avg"},
+    "handle_avg": {"mean_total"},
+    "wait_avg": {"mean_total"},
+    "total": {"total_tickets"},
+    "completed": {"total_tickets"},
+    "by_channel": {"Canal", "Tempo médio de atendimento", "Tempo médio de espera", "Total de atendimentos", "Total de atendimentos concluídos", "Média CSAT"},
+}
+
+# ====================== HELPERS ======================
 def month_key(y: int, m: int) -> str:
     return f"{y:04d}-{m:02d}"
 
-# ====================== Leitura SEGURA de CSV ======================
-def load_csv_safe(file) -> Optional[pd.DataFrame]:
-    if not file:
-        return None
+def hhmmss_to_seconds(s: str) -> int:
+    if pd.isna(s) or not s: return 0
+    s = str(s).strip()
+    parts = s.split(":")
+    if len(parts) != 3: return 0
     try:
-        content = file.read()
-        if len(content.strip()) == 0:
-            st.error(f"Arquivo vazio: {file.name}")
-            return None
-        df = pd.read_csv(BytesIO(content))
+        h, m, sec = map(int, parts)
+        return h * 3600 + m * 60 + sec
+    except:
+        return 0
+
+def seconds_to_hhmmss(sec: int) -> str:
+    if pd.isna(sec): return "00:00:00"
+    h = sec // 3600
+    m = (sec % 3600) // 60
+    s = sec % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+def classify_filename(name: str) -> str:
+    for ftype, pattern in FILE_PATTERNS.items():
+        if re.match(pattern, name, flags=re.IGNORECASE):
+            return ftype
+    return "unknown"
+
+def load_csv_safe(file) -> pd.DataFrame:
+    try:
+        df = pd.read_csv(file)
         if df.empty:
-            st.error(f"DataFrame vazio: {file.name}")
-            return None
-        st.success(f"{file.name}: {len(df)} linhas OK")
+            st.warning(f"Arquivo vazio: {file.name}")
+            return pd.DataFrame()
         return df
     except Exception as e:
         st.error(f"Erro ao ler {file.name}: {e}")
-        return None
+        return pd.DataFrame()
 
-# ====================== Mapeamento de Arquivos (SEUS NOMES REAIS) ======================
-FILE_MAPPING = {
-    "csat": ["_data_product__csat", "csat"],
-    "media_csat": ["_data_product__media_csat", "media_csat"],
-    "tma_por_canal": ["tempo_medio_de_atendimento_por_canal"],
-    "tma_geral": ["tempo_medio_de_atendimento"],
-    "tme_geral": ["tempo_medio_de_espera"],
-    "total_atendimentos": ["total_de_atendimentos"],
-    "total_atendimentos_conc": ["total_de_atendimentos_concluidos"],
-}
+def ensure_schema(df: pd.DataFrame, expected: set, label: str) -> pd.DataFrame:
+    if df.empty:
+        st.warning(f"{label}: vazio")
+        return df
+    df = df.rename(columns=lambda x: str(x).strip())
+    cols = set(df.columns)
+    if not expected.issubset(cols):
+        st.warning(f"{label}: colunas erradas. Esperado: {sorted(expected)} | Encontrado: {sorted(cols)}")
+        return pd.DataFrame()
+    return df[list(expected)]
 
-def detect_kind(filename: str) -> Optional[str]:
-    low = filename.lower().replace('.csv', '')
-    for kind, tokens in FILE_MAPPING.items():
-        if any(tok in low for tok in tokens):
-            return kind
-    return None
+def validate_and_clean(data: dict) -> dict:
+    cleaned = {}
 
-# ====================== App ======================
+    if "csat_by_cat" in data:
+        df = ensure_schema(data["csat_by_cat"], EXPECTED_SCHEMAS["csat_by_cat"], "CSAT por categoria")
+        if not df.empty:
+            df["Categoria"] = df["Categoria"].astype(str).str.strip()
+            df["score_total"] = pd.to_numeric(df["score_total"], errors="coerce").fillna(0).astype(int)
+            ordered = []
+            for cat in CSAT_ORDER:
+                val = df.loc[df["Categoria"] == cat, "score_total"].sum()
+                ordered.append({"Categoria": cat, "score_total": int(val)})
+            cleaned["csat_by_cat"] = pd.DataFrame(ordered)
+
+    if "csat_avg" in data:
+        df = ensure_schema(data["csat_avg"], EXPECTED_SCHEMAS["csat_avg"], "CSAT médio")
+        if not df.empty:
+            avg = pd.to_numeric(df["avg"], errors="coerce").iloc[0]
+            cleaned["csat_avg"] = pd.DataFrame({"avg": [float(avg)]})
+
+    for key, col in [("handle_avg", "Tempo médio de atendimento"), ("wait_avg", "Tempo médio de espera")]:
+        if key in data:
+            df = ensure_schema(data[key], EXPECTED_SCHEMAS[key], col)
+            if not df.empty:
+                sec = hhmmss_to_seconds(df["mean_total"].iloc[0])
+                cleaned[key] = pd.DataFrame({
+                    "mean_total": [seconds_to_hhmmss(sec)],
+                    "seconds": [sec]
+                })
+
+    for key, col in [("total", "Total de atendimentos"), ("completed", "Atendimentos concluídos")]:
+        if key in data:
+            df = ensure_schema(data[key], EXPECTED_SCHEMAS[key], col)
+            if not df.empty:
+                val = int(pd.to_numeric(df["total_tickets"], errors="coerce").sum())
+                cleaned[key] = pd.DataFrame({"total_tickets": [val]})
+
+    if "by_channel" in data:
+        df = ensure_schema(data["by_channel"], EXPECTED_SCHEMAS["by_channel"], "Por canal")
+        if not df.empty:
+            df["Canal"] = df["Canal"].astype(str).str.strip()
+            for c in ["Total de atendimentos", "Total de atendimentos concluídos"]:
+                df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
+            df["Média CSAT"] = pd.to_numeric(df["Média CSAT"], errors="coerce")
+            df["_handle_sec"] = df["Tempo médio de atendimento"].astype(str).apply(hhmmss_to_seconds)
+            df["_wait_sec"] = df["Tempo médio de espera"].astype(str).apply(hhmmss_to_seconds)
+            cleaned["by_channel"] = df
+
+    return cleaned
+
+def compute_kpis(cleaned: dict) -> dict:
+    k = {
+        "total": 0, "completed": 0, "completion_rate": 0.0,
+        "wait_sec": 0, "csat": 0.0, "evaluated": 0, "coverage": 0.0
+    }
+    if "total" in cleaned: k["total"] = int(cleaned["total"]["total_tickets"].iloc[0])
+    if "completed" in cleaned: k["completed"] = int(cleaned["completed"]["total_tickets"].iloc[0])
+    if k["total"] > 0: k["completion_rate"] = k["completed"] / k["total"] * 100
+    if "wait_avg" in cleaned: k["wait_sec"] = int(cleaned["wait_avg"]["seconds"].iloc[0])
+    if "csat_avg" in cleaned: k["csat"] = float(cleaned["csat_avg"]["avg"].iloc[0])
+    if "csat_by_cat" in cleaned: k["evaluated"] = int(cleaned["csat_by_cat"]["score_total"].sum())
+    if k["completed"] > 0: k["coverage"] = k["evaluated"] / k["completed"] * 100
+    return k
+
+def near_threshold(actual, target, greater_is_better=True):
+    if pd.isna(actual): return False
+    if greater_is_better:
+        return actual < target and actual >= target * (1 - SLA["NEAR_RATIO"])
+    else:
+        return actual > target and actual <= target * (1 + SLA["NEAR_RATIO"])
+
+def color_flag(ok: bool, warn: bool = False):
+    if ok: return "OK"
+    if warn: return "Warning"
+    return "BAD"
+
+def sla_flags(kpis: dict):
+    flags = {}
+    wt = kpis["wait_sec"] / 3600
+    if wt > 0:
+        ok = wt < SLA["WAITING_TIME_MAX_HOURS"]
+        warn = near_threshold(wt, SLA["WAITING_TIME_MAX_HOURS"], greater_is_better=False)
+        flags["wait"] = (ok, warn)
+    cs = kpis["csat"]
+    if cs > 0:
+        ok = cs >= SLA["CSAT_MIN"]
+        warn = near_threshold(cs, SLA["CSAT_MIN"], greater_is_better=True)
+        flags["csat"] = (ok, warn)
+    cr = kpis["completion_rate"]
+    if cr > 0:
+        ok = cr > SLA["COMPLETION_RATE_MIN"]
+        warn = near_threshold(cr, SLA["COMPLETION_RATE_MIN"], greater_is_better=True)
+        flags["completion"] = (ok, warn)
+    cov = kpis["coverage"]
+    if cov > 0:
+        ok = cov >= SLA["EVAL_COVERAGE_MIN"]
+        warn = near_threshold(cov, SLA["EVAL_COVERAGE_MIN"], greater_is_better=True)
+        flags["coverage"] = (ok, warn)
+    return flags
+
+# ====================== PERSISTÊNCIA ======================
+def save_month(mkey: str, data: dict):
+    os.makedirs(f"{DATA_DIR}/{mkey}", exist_ok=True)
+    cleaned = validate_and_clean(data)
+    for t, df in cleaned.items():
+        df.to_csv(f"{DATA_DIR}/{mkey}/{t}.csv", index=False)
+
+def load_all() -> dict:
+    result = {}
+    if not os.path.isdir(DATA_DIR): return result
+    for mkey in sorted(os.listdir(DATA_DIR)):
+        path = f"{DATA_DIR}/{mkey}"
+        if not os.path.isdir(path): continue
+        payload = {}
+        for f in os.listdir(path):
+            if f.endswith(".csv"):
+                t = f[:-4]
+                try:
+                    df = pd.read_csv(f"{path}/{f}")
+                    payload[t] = df
+                except: pass
+        if payload: result[mkey] = payload
+    return result
+
+# ====================== APP ======================
 st.set_page_config(page_title="CSAT Dashboard", layout="wide")
-st.title("Dashboard CSAT — Upload de Dados")
+st.title("Dashboard CSAT Mensal (CSV) — Persistência Local")
 
-if "months" not in st.session_state:
-    st.session_state["months"] = {}
+if "data" not in st.session_state:
+    st.session_state.data = load_all()
 
 # Sidebar
 with st.sidebar:
     st.header("Mês")
     today = date.today()
     month = st.number_input("Mês", 1, 12, today.month)
-    year = st.number_input("Ano", 2000, 2100, today.year)
+    year = st.number_input("Ano", 2025, 2030, today.year)
     mk = month_key(year, month)
 
     st.subheader("Upload CSV")
     uploads = {
-        "csat": st.file_uploader("CSAT por Categoria (_data_product__csat_*.csv)", type="csv", key="u1"),
-        "media_csat": st.file_uploader("Média CSAT (_data_product__media_csat_*.csv)", type="csv", key="u2"),
-        "tma_por_canal": st.file_uploader("TMA por Canal (tempo_medio_de_atendimento_por_canal_*.csv)", type="csv", key="u3"),
-        "tma_geral": st.file_uploader("TMA Geral (tempo_medio_de_atendimento_*.csv)", type="csv", key="u4"),
-        "tme_geral": st.file_uploader("TME Geral (tempo_medio_de_espera_*.csv)", type="csv", key="u5"),
-        "total_atendimentos": st.file_uploader("Total de Atendimentos (total_de_atendimentos_*.csv)", type="csv", key="u6"),
-        "total_atendimentos_conc": st.file_uploader("Atendimentos Concluídos (total_de_atendimentos_concluidos_*.csv)", type="csv", key="u7"),
+        "csat_by_cat": st.file_uploader("1) _data_product__csat_*.csv", type="csv"),
+        "csat_avg": st.file_uploader("2) _data_product__media_csat_*.csv", type="csv"),
+        "handle_avg": st.file_uploader("3) tempo_medio_de_atendimento_*.csv", type="csv"),
+        "wait_avg": st.file_uploader("4) tempo_medio_de_espera_*.csv", type="csv"),
+        "total": st.file_uploader("5) total_de_atendimentos_*.csv", type="csv"),
+        "completed": st.file_uploader("6) total_de_atendimentos_concluidos_*.csv", type="csv"),
+        "by_channel": st.file_uploader("7) tempo_medio_de_atendimento_por_canal_*.csv", type="csv"),
     }
 
-    if st.button("Salvar no mês"):
-        valid_files = {}
-        for kind, file in uploads.items():
-            df = load_csv_safe(file)
-            if df is not None:
-                valid_files[kind] = df
+    multi = st.file_uploader("Upload múltiplo", type="csv", accept_multiple_files=True)
 
-        if valid_files:
-            payload = st.session_state["months"].get(mk, {})
-            payload.update(valid_files)
-            st.session_state["months"][mk] = payload
+    if st.button("Salvar arquivos do mês atual"):
+        raw = st.session_state.data.get(mk, {})
+        for key, file in uploads.items():
+            if file:
+                df = load_csv_safe(file)
+                if not df.empty:
+                    ftype = classify_filename(file.name)
+                    if ftype != "unknown":
+                        raw[ftype] = df
+        for file in multi or []:
+            ftype = classify_filename(file.name)
+            if ftype != "unknown":
+                df = load_csv_safe(file)
+                if not df.empty:
+                    raw[ftype] = df
+        if raw:
+            st.session_state.data[mk] = raw
+            save_month(mk, raw)
+            st.success(f"Dados salvos para {mk}")
 
-            folder = os.path.join(LOCAL_STORE_DIR, mk)
-            os.makedirs(folder, exist_ok=True)
-            for kind, df in valid_files.items():
-                path = os.path.join(folder, f"{kind}.csv")
-                df.to_csv(path, index=False)
-            st.success(f"{len(valid_files)} arquivos salvos em {mk}!")
-        else:
-            st.error("Nenhum arquivo válido foi carregado.")
+# ====================== TABS (IDÊNTICAS AO ORIGINAL) ======================
+tabs = st.tabs(["Visão Geral", "Por Canal", "Comparativo Mensal", "Dicionário de Dados"])
 
-# ====================== Funções de Cálculo ======================
-def get_payload():
-    return st.session_state["months"].get(mk, {})
-
-def safe_sum(df: pd.DataFrame) -> float:
-    if df.empty: return 0.0
-    return df.select_dtypes("number").sum().sum()
-
-def to_hours(td_str: str) -> float:
-    try:
-        h, m, s = map(int, td_str.split(':'))
-        return h + m/60 + s/3600
-    except:
-        return 0.0
-
-# ====================== Tabs ======================
-tabs = st.tabs(["Visão Geral", "Por Canal", "Distribuição CSAT", "Dicionário"])
-
-# --- Visão Geral ---
+# --- VISÃO GERAL ---
 with tabs[0]:
-    st.subheader(f"Visão Geral — {mk}")
-    p = get_payload()
-    if not p:
-        st.info("Nenhum dado carregado. Faça upload dos CSVs.")
+    st.subheader(f"Mês selecionado: {mk}")
+    if mk not in st.session_state.data:
+        st.info("Nenhum dado carregado. Faça upload e salve.")
     else:
-        total = safe_sum(p.get("total_atendimentos", pd.DataFrame()))
-        completed = safe_sum(p.get("total_atendimentos_conc", pd.DataFrame()))
-        csat = p.get("media_csat", pd.DataFrame()).iloc[0,0] if "media_csat" in p else 0.0
-        wait_str = p.get("tme_geral", pd.DataFrame()).iloc[0,0] if "tme_geral" in p else "00:00:00"
-        wait_h = to_hours(wait_str)
+        raw = st.session_state.data[mk]
+        cleaned = validate_and_clean(raw)
+        kpis = compute_kpis(cleaned)
+        flags = sla_flags(kpis)
 
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total de Atendimentos", int(total))
-        col2.metric("Concluídos", int(completed))
-        col3.metric("CSAT Médio", f"{csat:.2f}")
-        col4.metric("Tempo Médio de Espera", f"{wait_h:.1f}h")
+        c1, c2, c3, c4 = st.columns(4)
+        c5, c6, c7 = st.columns(3)
 
-        completion = (completed / total * 100) if total > 0 else 0
-        st.progress(completion / 100)
-        st.caption(f"Taxa de Conclusão: {completion:.1f}%")
+        total = kpis["total"]
+        completed = kpis["completed"]
+        cr = kpis["completion_rate"]
+        wt = kpis["wait_sec"] / 3600
+        cs = kpis["csat"]
+        ev = kpis["evaluated"]
+        cov = kpis["coverage"]
 
-# --- Por Canal ---
+        c1.metric("Total de atendimentos", f"{int(total) if total else '-'}")
+        c2.metric("Concluídos", f"{int(completed) if completed else '-'}")
+        comp_icon = color_flag(*flags.get("completion", (False, False)))
+        c3.metric("Taxa de conclusão", f"{cr:.1f}%" if cr else "-", help=f"SLA > {SLA['COMPLETION_RATE_MIN']}% {comp_icon}")
+        c4.metric("Tempo médio de atendimento", seconds_to_hhmmss(kpis.get("handle_avg_sec", 0)))
+        w_ok, w_warn = flags.get("wait", (False, False))
+        c5.metric("Tempo médio de espera", f"{wt:.1f}h", help="SLA < 24h " + ("OK" if w_ok else "Warning" if w_warn else "BAD"))
+        cs_ok, cs_warn = flags.get("csat", (False, False))
+        c6.metric("CSAT médio (1–5)", f"{cs:.2f}" if cs else "-", help=f"SLA ≥ {SLA['CSAT_MIN']} " + ("OK" if cs_ok else "Warning" if cs_warn else "BAD"))
+        cov_ok, cov_warn = flags.get("coverage", (False, False))
+        c7.metric("Cobertura de avaliação", f"{cov:.1f}%" if cov else "-", help=f"SLA ≥ {SLA['EVAL_COVERAGE_MIN']}% " + ("OK" if cov_ok else "Warning" if cov_warn else "BAD"))
+
+        if ev > completed:
+            st.warning("Inconsistência: avaliadas > concluídas.")
+
+        st.markdown("---")
+        if "csat_by_cat" in cleaned:
+            dist = cleaned["csat_by_cat"].copy()
+            dist["percent"] = dist["score_total"] / dist["score_total"].sum() * 100 if dist["score_total"].sum() > 0 else 0
+            left, right = st.columns([2, 1])
+            with left:
+                fig = px.bar(dist, x="Categoria", y="percent", title="CSAT por Categoria (%)", text=dist["percent"].round(1))
+                fig.update_layout(xaxis_title="", yaxis_title="%")
+                st.plotly_chart(fig, use_container_width=True)
+            with right:
+                st.dataframe(dist, use_container_width=True)
+                st.download_button("Baixar tabela (CSV)", data=dist.to_csv(index=False).encode("utf-8"), file_name=f"csat_{mk}.csv")
+
+# --- POR CANAL ---
 with tabs[1]:
-    st.subheader(f"TMA por Canal — {mk}")
-    dfc = p.get("tma_por_canal")
-    if dfc is None or dfc.empty:
-        st.info("Sem dados de TMA por canal.")
+    st.subheader("Indicadores por Canal")
+    if "by_channel" not in st.session_state.data.get(mk, {}):
+        st.info("Arquivo por canal não disponível.")
     else:
-        dfc = dfc.copy()
-        dfc["TMA (h)"] = dfc["Tempo médio de atendimento"].apply(to_hours)
-        dfc["TME (h)"] = dfc["Tempo médio de espera"].apply(to_hours)
-        dfc = dfc.sort_values("TMA (h)", ascending=False)
+        dfc = validate_and_clean(st.session_state.data[mk])["by_channel"]
+        channels = sorted(dfc["Canal"].unique())
+        selected = st.multiselect("Filtrar canais", channels, default=channels)
+        dfc = dfc[dfc["Canal"].isin(selected)]
+        st.dataframe(dfc, use_container_width=True)
+        st.download_button("Baixar por canal", data=dfc.to_csv(index=False).encode("utf-8"), file_name=f"por_canal_{mk}.csv")
+        st.markdown("---")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.plotly_chart(px.bar(dfc, x="Canal", y="Total de atendimentos", title="Total por canal"), use_container_width=True)
+        with col2:
+            st.plotly_chart(px.bar(dfc, x="Canal", y="Total de atendimentos concluídos", title="Concluídos por canal"), use_container_width=True)
+        col3, col4 = st.columns(2)
+        with col3:
+            st.plotly_chart(px.bar(dfc, x="Canal", y="_handle_sec", title="TMA (segundos)"), use_container_width=True)
+        with col4:
+            dft = dfc.copy()
+            dft["TME (h)"] = dft["_wait_sec"] / 3600
+            st.plotly_chart(px.bar(dft, x="Canal", y="TME (h)", title="TME (horas)"), use_container_width=True)
+        st.markdown("---")
+        st.plotly_chart(px.bar(dfc, x="Canal", y="Média CSAT", title="CSAT médio por canal"), use_container_width=True)
 
-        fig_tma = px.bar(dfc, x="Canal", y="TMA (h)", title="Tempo Médio de Atendimento por Canal")
-        st.plotly_chart(fig_tma, use_container_width=True)
-
-        fig_tme = px.bar(dfc, x="Canal", y="TME (h)", title="Tempo Médio de Espera por Canal")
-        st.plotly_chart(fig_tme, use_container_width=True)
-
-# --- Distribuição CSAT ---
+# --- COMPARATIVO MENSAL ---
 with tabs[2]:
-    st.subheader(f"Distribuição CSAT — {mk}")
-    df_cat = p.get("csat")
-    if df_cat is None or df_cat.empty:
-        st.info("Sem dados de CSAT por categoria.")
+    st.subheader("Comparativo Mensal (KPIs)")
+    if len(st.session_state.data) < 2:
+        st.info("Carregue pelo menos dois meses.")
     else:
-        order = ["Muito Insatisfeito", "Insatisfeito", "Neutro", "Satisfeito", "Muito Satisfeito"]
-        df_cat["Categoria"] = pd.Categorical(df_cat["Categoria"], categories=order, ordered=True)
-        df_cat = df_cat.sort_values("Categoria")
+        rows = []
+        for mkey, data in sorted(st.session_state.data.items()):
+            k = compute_kpis(validate_and_clean(data))
+            rows.append({
+                "mes": mkey,
+                "total": k["total"],
+                "concluidos": k["completed"],
+                "taxa_conclusao": k["completion_rate"],
+                "tempo_espera_h": k["wait_sec"] / 3600,
+                "csat_medio": k["csat"],
+                "cobertura_%": k["coverage"],
+            })
+        comp = pd.DataFrame(rows)
+        st.dataframe(comp, use_container_width=True)
+        st.download_button("Baixar comparativo", data=comp.to_csv(index=False).encode("utf-8"), file_name="comparativo_mensal.csv")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.plotly_chart(px.line(comp, x="mes", y="total", title="Total de atendimentos"), use_container_width=True)
+            st.plotly_chart(px.line(comp, x="mes", y="taxa_conclusao", title="Taxa de conclusão (%)"), use_container_width=True)
+        with c2:
+            st.plotly_chart(px.line(comp, x="mes", y="csat_medio", title="CSAT médio"), use_container_width=True)
+            st.plotly_chart(px.line(comp, x="mes", y="tempo_espera_h", title="Tempo médio de espera (h)"), use_container_width=True)
 
-        fig = px.bar(df_cat, x="Categoria", y="score_total", title="Respostas por Categoria CSAT")
-        st.plotly_chart(fig, use_container_width=True)
-
-# --- Dicionário ---
+# --- DICIONÁRIO ---
 with tabs[3]:
-    st.markdown("""
-    ### Dicionário de Arquivos
-    | Arquivo | Descrição |
-    |--------|---------|
-    | `_data_product__csat_*.csv` | CSAT por categoria |
-    | `_data_product__media_csat_*.csv` | Média geral do CSAT |
-    | `tempo_medio_de_atendimento_por_canal_*.csv` | TMA e TME por canal |
-    | `tempo_medio_de_atendimento_*.csv` | TMA geral |
-    | `tempo_medio_de_espera_*.csv` | TME geral |
-    | `total_de_atendimentos_*.csv` | Total de tickets |
-    | `total_de_atendimentos_concluidos_*.csv` | Tickets concluídos |
-    """)
+    st.subheader("Dicionário de Dados")
+    st.markdown(f"""
+**Arquivos .csv por mês:**
+- `_data_product__csat_*.csv` → `Categoria`, `score_total`
+- `_data_product__media_csat_*.csv` → `avg`
+- `tempo_medio_de_atendimento_*.csv` → `mean_total` (HH:MM:SS)
+- `tempo_medio_de_espera_*.csv` → `mean_total` (HH:MM:SS)
+- `total_de_atendimentos_*.csv` → `total_tickets`
+- `total_de_atendimentos_concluidos_*.csv` → `total_tickets`
+- `tempo_medio_de_atendimento_por_canal_*.csv` → `Canal`, `Tempo médio de atendimento`, `Tempo médio de espera`, `Total de atendimentos`, `Total de atendimentos concluídos`, `Média CSAT`
+
+**SLAs:**
+- Espera < 24h
+- CSAT ≥ 4.0
+- Conclusão > 90%
+- Cobertura ≥ 75%
+""")
