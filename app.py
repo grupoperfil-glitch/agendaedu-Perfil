@@ -1,5 +1,7 @@
-# app.py — Dashboard CSAT (CSV) — GitHub via ZIP + Upload Individual
-# Corrigido: to_numeric + sum() em DataFrames numéricos
+# app.py — Dashboard CSAT (CSV) — GitHub + Upload com Nomes Reais
+# Compatível com: _data_product__csat_*.csv, tempo_medio_de_*.csv, etc.
+# Requisitos: pip install streamlit plotly pandas numpy requests
+
 from __future__ import annotations
 import os, re
 from io import BytesIO, StringIO
@@ -72,15 +74,15 @@ def to_hours(series: pd.Series) -> pd.Series:
     out.loc[~has_colon] = num / 3600.0
     return out
 
-# ====================== Mapeamento de Arquivos ======================
+# ====================== Mapeamento de Arquivos (SEUS NOMES REAIS) ======================
 KEYS = {
-    "csat": ["csat_by_cat", "csat"],
-    "media_csat": ["csat_avg", "media_csat"],
-    "tma_por_canal": ["by_channel", "tma_por_canal"],
-    "tma_geral": ["handle_avg", "tma_geral"],
-    "tme_geral": ["wait_avg", "tme_geral"],
-    "total_atendimentos": ["total"],
-    "total_atendimentos_conc": ["completed"],
+    "csat": ["data_product__csat", "csat"],
+    "media_csat": ["data_product__media_csat", "media_csat"],
+    "tma_por_canal": ["tempo_medio_de_atendimento_por_canal"],
+    "tma_geral": ["tempo_medio_de_atendimento"],
+    "tme_geral": ["tempo_medio_de_espera"],
+    "total_atendimentos": ["total_de_atendimentos"],
+    "total_atendimentos_conc": ["total_de_atendimentos_concluidos", "total_de_atendimentos_concluídos"],
 }
 
 def detect_kind(filename: str) -> Optional[str]:
@@ -204,7 +206,7 @@ def upload_file(file, kind: str) -> Optional[pd.DataFrame]:
 
 # ====================== App ======================
 st.set_page_config(page_title="CSAT Dashboard", layout="wide")
-st.title("Dashboard CSAT — GitHub CSV + Upload")
+st.title("Dashboard CSAT — GitHub + Upload")
 
 if "months" not in st.session_state:
     st.session_state["months"] = {}
@@ -243,13 +245,34 @@ with st.sidebar:
 
     st.subheader("Upload CSV")
     uploads = {
-        "csat": st.file_uploader("CSAT por cat (csat_by_cat.csv)", type="csv", key="u1"),
-        "media_csat": st.file_uploader("Média CSAT (csat_avg.csv)", type="csv", key="u2"),
-        "tma_por_canal": st.file_uploader("TMA por Canal (by_channel.csv)", type="csv", key="u3"),
-        "tma_geral": st.file_uploader("TMA Geral (handle_avg.csv)", type="csv", key="u4"),
-        "tme_geral": st.file_uploader("TME Geral (wait_avg.csv)", type="csv", key="u5"),
-        "total_atendimentos": st.file_uploader("Total (total.csv)", type="csv", key="u6"),
-        "total_atendimentos_conc": st.file_uploader("Concluídos (completed.csv)", type="csv", key="u7"),
+        "csat": st.file_uploader(
+            "CSAT por Categoria (_data_product__csat_*.csv)", 
+            type="csv", key="u1"
+        ),
+        "media_csat": st.file_uploader(
+            "Média CSAT (_data_product__media_csat_*.csv)", 
+            type="csv", key="u2"
+        ),
+        "tma_por_canal": st.file_uploader(
+            "TMA por Canal (tempo_medio_de_atendimento_por_canal_*.csv)", 
+            type="csv", key="u3"
+        ),
+        "tma_geral": st.file_uploader(
+            "TMA Geral (tempo_medio_de_atendimento_*.csv)", 
+            type="csv", key="u4"
+        ),
+        "tme_geral": st.file_uploader(
+            "TME Geral (tempo_medio_de_espera_*.csv)", 
+            type="csv", key="u5"
+        ),
+        "total_atendimentos": st.file_uploader(
+            "Total de Atendimentos (total_de_atendimentos_*.csv)", 
+            type="csv", key="u6"
+        ),
+        "total_atendimentos_conc": st.file_uploader(
+            "Atendimentos Concluídos (total_de_atendimentos_concluidos_*.csv)", 
+            type="csv", key="u7"
+        ),
     }
 
     if st.button("Salvar no mês"):
@@ -281,6 +304,13 @@ def get_by_channel() -> Optional[pd.DataFrame]:
             return normalize_canal_column(v.copy())
     return None
 
+# Função segura para soma
+def safe_sum(df: pd.DataFrame) -> float:
+    if df.empty:
+        return np.nan
+    num = df.select_dtypes(include="number")
+    return num.sum().sum() if not num.empty else np.nan
+
 # SLAs
 SLA = {"completion": 90, "wait_h": 24, "csat": 4.0, "coverage": 75}
 
@@ -295,13 +325,6 @@ with tabs[0]:
         st.info("Sem dados para este mês.")
     else:
         total = completed = csat = wait_h = evaluated = coverage = np.nan
-
-        # CORRIGIDO: soma segura de colunas numéricas
-        def safe_sum(df: pd.DataFrame) -> float:
-            if df.empty:
-                return np.nan
-            num = df.select_dtypes(include="number")
-            return num.sum().sum() if not num.empty else np.nan
 
         df = p.get("total_atendimentos")
         if isinstance(df, pd.DataFrame): 
@@ -419,12 +442,12 @@ with tabs[2]:
 # 4) Dicionário
 with tabs[3]:
     st.markdown("""
-### Dicionário de Dados (CSV)
-- `csat_by_cat.csv` → CSAT por categoria  
-- `csat_avg.csv` → CSAT médio  
-- `by_channel.csv` → TMA por canal  
-- `handle_avg.csv` → TMA geral  
-- `wait_avg.csv` → TME geral  
-- `total.csv` → Total de atendimentos  
-- `completed.csv` → Atendimentos concluídos  
+### Dicionário de Dados
+- `_data_product__csat_*.csv` → CSAT por categoria  
+- `_data_product__media_csat_*.csv` → Média CSAT  
+- `tempo_medio_de_atendimento_por_canal_*.csv` → TMA por canal  
+- `tempo_medio_de_atendimento_*.csv` → TMA geral  
+- `tempo_medio_de_espera_*.csv` → TME geral  
+- `total_de_atendimentos_*.csv` → Total de atendimentos  
+- `total_de_atendimentos_concluidos_*.csv` → Atendimentos concluídos  
 """)
