@@ -1,13 +1,10 @@
-# app.py — Dashboard CSAT (XLSX) — GitHub via ZIP + Upload Individual
-# Requisitos: pip install streamlit plotly pandas numpy openpyxl requests
-# Secrets (RECOMENDADO em .streamlit/secrets.toml):
-# GITHUB_DATA_REPO = "grupoperfil-glitch/csat-dashboard-data"
-# GITHUB_DATA_PATH = "data"
-# GITHUB_DATA_BRANCH = "main"
+# app.py — Dashboard CSAT (CSV) — GitHub via ZIP + Upload Individual
+# Adaptado para estrutura CSV em pastas 2025-MM/ (ex: csat_avg.csv, handle_avg.csv)
+# Requisitos: pip install streamlit plotly pandas numpy requests
 
 from __future__ import annotations
 import os, re
-from io import BytesIO
+from io import BytesIO, StringIO
 from datetime import date
 from typing import Dict, List, Optional, Tuple
 from zipfile import ZipFile
@@ -39,17 +36,17 @@ def ensure_dir(p: str) -> None:
 def month_key(y: int, m: int) -> str:
     return f"{y:04d}-{m:02d}"
 
-# ====================== Excel & Normalização ======================
-def load_xlsx(file: BytesIO | str) -> pd.DataFrame:
+# ====================== Leitura de CSV ======================
+def load_csv(file: BytesIO | str) -> pd.DataFrame:
     try:
-        xl = pd.ExcelFile(file)
-        sheet = "Resultado da consulta" if "Resultado da consulta" in xl.sheet_names else xl.sheet_names[0]
-        return xl.parse(sheet)
-    except Exception:
-        return pd.read_excel(file)
+        content = file.read().decode('utf-8') if isinstance(file, BytesIO) else file
+        return pd.read_csv(StringIO(content))
+    except Exception as e:
+        st.error(f"Erro ao ler CSV: {e}")
+        return pd.DataFrame()
 
-def load_xlsx_from_bytes(b: bytes) -> pd.DataFrame:
-    return load_xlsx(BytesIO(b))
+def load_csv_from_bytes(b: bytes) -> pd.DataFrame:
+    return load_csv(BytesIO(b))
 
 def normalize_canal_column(df: pd.DataFrame) -> pd.DataFrame:
     if "Canal" in df.columns:
@@ -77,22 +74,22 @@ def to_hours(series: pd.Series) -> pd.Series:
     out.loc[~has_colon] = num / 3600.0
     return out
 
-# ====================== Mapeamento de Arquivos ======================
+# ====================== Mapeamento de Arquivos (adaptado para seus nomes CSV) ======================
 KEYS = {
-    "csat": ["data_product__csat"],
-    "media_csat": ["data_product__media_csat", "media_csat"],
-    "tma_por_canal": ["tempo_medio_de_atendimento_por_canal"],
-    "tma_geral": ["tempo_medio_de_atendimento"],
-    "tme_geral": ["tempo_medio_de_espera"],
-    "total_atendimentos": ["total_de_atendimentos"],
-    "total_atendimentos_conc": ["total_de_atendimentos_concluidos", "total_de_atendimentos_concluídos"],
+    "csat": ["csat_by_cat", "csat"],  # csat_by_cat.csv ou csat.csv
+    "media_csat": ["csat_avg", "media_csat"],  # csat_avg.csv
+    "tma_por_canal": ["by_channel", "tma_por_canal"],  # by_channel.csv
+    "tma_geral": ["handle_avg", "tma_geral"],  # handle_avg.csv
+    "tme_geral": ["wait_avg", "tme_geral"],  # wait_avg.csv
+    "total_atendimentos": ["total"],  # total.csv
+    "total_atendimentos_conc": ["completed"],  # completed.csv
 }
 
 def detect_kind(filename: str) -> Optional[str]:
-    low = filename.lower()
+    low = filename.lower().replace('.csv', '')  # Remove .csv para matching
     for kind, tokens in KEYS.items():
         for t in tokens:
-            if t in low and low.endswith(".xlsx"):
+            if t in low:
                 return kind
     return None
 
@@ -100,7 +97,7 @@ def extract_month(s: str) -> Optional[str]:
     m = re.search(r"\d{4}-\d{2}", s)
     return m.group(0) if m else None
 
-# ====================== GitHub ZIP ======================
+# ====================== GitHub ZIP (adaptado para CSV) ======================
 def fetch_zip() -> Optional[bytes]:
     headers = {"Authorization": f"token {GH_TOKEN}"} if GH_TOKEN else {}
     try:
@@ -117,7 +114,7 @@ def group_by_month(zf: ZipFile) -> Dict[str, List[str]]:
     prefix = f"{root}/{GH_PATH}/" if GH_PATH else f"{root}/"
     months: Dict[str, List[str]] = {}
     for n in names:
-        if not n.lower().endswith(".xlsx") or not n.startswith(prefix):
+        if not n.lower().endswith(".csv") or not n.startswith(prefix):
             continue
         parts = n.split("/")
         month = next((extract_month(p) for p in parts if extract_month(p)), None)
@@ -137,10 +134,10 @@ def read_month(zf: ZipFile, paths: List[str]) -> dict:
     for kind, lst in by_kind.items():
         latest = sorted(lst)[-1]
         try:
-            df = load_xlsx_from_bytes(zf.read(latest))
+            df = load_csv_from_bytes(zf.read(latest))
             payload[kind] = df
         except Exception:
-            LAST_GH_STATUS.append(f"XLSX falhou: {latest}")
+            LAST_GH_STATUS.append(f"CSV falhou: {latest}")
     return build_by_channel(payload)
 
 def build_by_channel(payload: dict) -> dict:
@@ -150,9 +147,9 @@ def build_by_channel(payload: dict) -> dict:
     merged = dfs[0].copy()
     for df in dfs[1:]:
         merged = merged.merge(df, on="Canal", how="outer")
-    if (col := find(merged, ["Média CSAT", "media csat", "avg"])) and col != "Média CSAT":
-        merged.rename(columns={	alert: "Média CSAT"}, inplace=True)
-    if (col := find(merged, ["Respostas CSAT", "score_total", "qtd", "qtde"])) and col != "Respostas CSAT":
+    if (col := find(merged, ["Média CSAT", "media csat", "avg"])):
+        merged.rename(columns={col: "Média CSAT"}, inplace=True)
+    if (col := find(merged, ["Respostas CSAT", "score_total", "qtd", "qtde"])):
         merged.rename(columns={col: "Respostas CSAT"}, inplace=True)
     payload["by_channel"] = merged
     return payload
@@ -174,7 +171,7 @@ def load_github(force: bool = False) -> Tuple[int, int]:
                 loaded += 1
         return loaded, files
 
-# ====================== Local Fallback ======================
+# ====================== Local Fallback (adaptado para CSV) ======================
 def load_local() -> int:
     if not os.path.isdir(LOCAL_STORE_DIR):
         return 0
@@ -185,11 +182,11 @@ def load_local() -> int:
             if os.path.isdir(path):
                 payload = {}
                 for f in os.listdir(path):
-                    if f.lower().endswith(".xlsx"):
+                    if f.lower().endswith(".csv"):
                         kind = detect_kind(f)
                         if kind:
                             try:
-                                df = load_xlsx(os.path.join(path, f))
+                                df = pd.read_csv(os.path.join(path, f))
                                 payload[kind] = df
                             except:
                                 pass
@@ -198,20 +195,19 @@ def load_local() -> int:
                     loaded += 1
     return loaded
 
-# ====================== Upload ======================
+# ====================== Upload (adaptado para CSV) ======================
 def upload_file(file, kind: str) -> Optional[pd.DataFrame]:
     if not file or not any(tok in file.name.lower() for tok in KEYS.get(kind, [])):
         return None
     try:
-        return load_xlsx(file)
+        return load_csv(file)
     except:
         return None
 
 # ====================== App ======================
 st.set_page_config(page_title="CSAT Dashboard", layout="wide")
-st.title("Dashboard CSAT — GitHub + Upload")
+st.title("Dashboard CSAT — GitHub CSV + Upload")
 
-# GARANTE QUE months EXISTE
 if "months" not in st.session_state:
     st.session_state["months"] = {}
 
@@ -227,7 +223,7 @@ with st.sidebar:
     mk = month_key(year, month)
 
     st.markdown("**GitHub**")
-    st.write(f"`{GH_REPO}` → `{GH_PATH}`")
+    st.write(f"`{GH_REPO}` → `{GH_PATH}` (CSV)")
     if GH_TOKEN:
         st.success("Token OK")
     else:
@@ -236,7 +232,7 @@ with st.sidebar:
     if st.button("Recarregar GitHub"):
         LAST_GH_STATUS.clear()
         m, f = load_github(force=True)
-        st.success(f"{m} meses, {f} arquivos")
+        st.success(f"{m} meses, {f} arquivos CSV")
 
     with st.expander("Log"):
         st.write(f"GitHub: {gh_m} | Local: {local_m}")
@@ -245,17 +241,17 @@ with st.sidebar:
         if st.session_state["months"]:
             st.write("**Meses carregados:**")
             for m in sorted(st.session_state["months"].keys()):
-                st.write(f"{m}")
+                st.write(f"✅ {m}")
 
-    st.subheader("Upload")
+    st.subheader("Upload CSV")
     uploads = {
-        "csat": st.file_uploader("CSAT", type="xlsx", key="u1"),
-        "media_csat": st.file_uploader("Média CSAT", type="xlsx", key="u2"),
-        "tma_por_canal": st.file_uploader("TMA por Canal", type="xlsx", key="u3"),
-        "tma_geral": st.file_uploader("TMA Geral", type="xlsx", key="u4"),
-        "tme_geral": st.file_uploader("TME Geral", type="xlsx", key="u5"),
-        "total_atendimentos": st.file_uploader("Total", type="xlsx", key="u6"),
-        "total_atendimentos_conc": st.file_uploader("Concluídos", type="xlsx", key="u7"),
+        "csat": st.file_uploader("CSAT por cat (csat_by_cat.csv)", type="csv", key="u1"),
+        "media_csat": st.file_uploader("Média CSAT (csat_avg.csv)", type="csv", key="u2"),
+        "tma_por_canal": st.file_uploader("TMA por Canal (by_channel.csv)", type="csv", key="u3"),
+        "tma_geral": st.file_uploader("TMA Geral (handle_avg.csv)", type="csv", key="u4"),
+        "tme_geral": st.file_uploader("TME Geral (wait_avg.csv)", type="csv", key="u5"),
+        "total_atendimentos": st.file_uploader("Total (total.csv)", type="csv", key="u6"),
+        "total_atendimentos_conc": st.file_uploader("Concluídos (completed.csv)", type="csv", key="u7"),
     }
 
     if st.button("Salvar no mês"):
@@ -268,8 +264,8 @@ with st.sidebar:
             folder = os.path.join(LOCAL_STORE_DIR, mk)
             ensure_dir(folder)
             for k, df in partial.items():
-                df.to_excel(os.path.join(folder, f"{k}.xlsx"), index=False)
-            st.success(f"{len(partial)} arquivos salvos")
+                df.to_csv(os.path.join(folder, f"{k}.csv"), index=False)
+            st.success(f"{len(partial)} arquivos CSV salvos")
         else:
             st.warning("Nenhum arquivo válido")
 
@@ -420,12 +416,12 @@ with tabs[2]:
 # 4) Dicionário
 with tabs[3]:
     st.markdown("""
-### Dicionário de Dados
-- `data_product__csat_*.xlsx` → CSAT por categoria  
-- `data_product__media_csat_*.xlsx` → CSAT médio  
-- `tempo_medio_de_atendimento_por_canal_*.xlsx` → TMA por canal  
-- `tempo_medio_de_atendimento_*.xlsx` → TMA geral  
-- `tempo_medio_de_espera_*.xlsx` → TME geral  
-- `total_de_atendimentos_*.xlsx` → Total  
-- `total_de_atendimentos_concluidos_*.xlsx` → Concluídos  
+### Dicionário de Dados (adaptado para CSV)
+- `csat_by_cat.csv` ou `csat.csv` → CSAT por categoria (col: Categoria, score_total)  
+- `csat_avg.csv` → CSAT médio (col: avg)  
+- `by_channel.csv` → TMA por canal (col: Canal, mean_total, etc.)  
+- `handle_avg.csv` → TMA geral (col: mean_total)  
+- `wait_avg.csv` → TME geral (col: mean_total)  
+- `total.csv` → Total atendimentos (col: total_tickets)  
+- `completed.csv` → Concluídos (col: total_tickets)  
 """)
