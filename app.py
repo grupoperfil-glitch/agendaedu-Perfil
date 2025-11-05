@@ -1,6 +1,6 @@
-# app.py — Dashboard CSAT (CSV) — GitHub + Upload com Nomes Reais
-# Compatível com: _data_product__csat_*.csv, tempo_medio_de_*.csv, etc.
-# Requisitos: pip install streamlit plotly pandas numpy requests
+# app.py — Dashboard CSAT (CSV) — GitHub + Upload (CORRIGIDO PARA SEUS CSVs)
+# Reconhece: csat_avg.csv, handle_avg.csv, wait_avg.csv DO GITHUB
+# Upload: nomes reais _data_product__csat_*.csv
 
 from __future__ import annotations
 import os, re
@@ -74,15 +74,17 @@ def to_hours(series: pd.Series) -> pd.Series:
     out.loc[~has_colon] = num / 3600.0
     return out
 
-# ====================== Mapeamento de Arquivos (SEUS NOMES REAIS) ======================
+# ====================== Mapeamento CORRIGIDO ======================
+# GITHUB: csat_avg.csv, handle_avg.csv, wait_avg.csv, etc.
+# UPLOAD: _data_product__csat_*.csv, tempo_medio_de_*.csv
 KEYS = {
-    "csat": ["data_product__csat", "csat"],
-    "media_csat": ["data_product__media_csat", "media_csat"],
-    "tma_por_canal": ["tempo_medio_de_atendimento_por_canal"],
-    "tma_geral": ["tempo_medio_de_atendimento"],
-    "tme_geral": ["tempo_medio_de_espera"],
-    "total_atendimentos": ["total_de_atendimentos"],
-    "total_atendimentos_conc": ["total_de_atendimentos_concluidos", "total_de_atendimentos_concluídos"],
+    "csat": ["csat_by_cat", "csat", "data_product__csat"],
+    "media_csat": ["csat_avg", "data_product__media_csat"],
+    "tma_por_canal": ["by_channel", "tempo_medio_de_atendimento_por_canal"],
+    "tma_geral": ["handle_avg", "tempo_medio_de_atendimento"],
+    "tme_geral": ["wait_avg", "tempo_medio_de_espera"],
+    "total_atendimentos": ["total", "total_de_atendimentos"],
+    "total_atendimentos_conc": ["completed", "total_de_atendimentos_concluidos"],
 }
 
 def detect_kind(filename: str) -> Optional[str]:
@@ -197,7 +199,7 @@ def load_local() -> int:
 
 # ====================== Upload ======================
 def upload_file(file, kind: str) -> Optional[pd.DataFrame]:
-    if not file or not any(tok in file.name.lower() for tok in KEYS.get(kind, [])):
+    if not file:
         return None
     try:
         return load_csv(file)
@@ -387,67 +389,4 @@ with tabs[1]:
         with col1:
             if (col := find(dfc, ["Tempo médio de atendimento", "mean_total"])):
                 dfc["TMA (h)"] = to_hours(dfc[col])
-                st.plotly_chart(px.bar(dfc, x="Canal", y="TMA (h)", title="TMA por Canal (horas)"), use_container_width=True)
-        with col2:
-            if (col := find(dfc, ["Tempo médio de espera", "mean_wait"])):
-                dfc["TME (h)"] = to_hours(dfc[col])
-                st.plotly_chart(px.bar(dfc, x="Canal", y="TME (h)", title="TME por Canal (horas)"), use_container_width=True)
-
-        if (col := find(dfc, ["Média CSAT"])):
-            st.markdown("### CSAT Médio por Canal")
-            st.plotly_chart(px.bar(dfc, x="Canal", y=col, title="CSAT Médio"), use_container_width=True)
-
-# 3) Comparativo Mensal
-with tabs[2]:
-    st.subheader("Comparativo Mensal")
-    months = sorted(st.session_state["months"].keys())
-    if len(months) < 2:
-        st.info("Mínimo 2 meses")
-    else:
-        rows = []
-        for m in months:
-            p = st.session_state["months"][m]
-            total = completed = csat = wait_h = coverage = np.nan
-            df = p.get("total_atendimentos")
-            if isinstance(df, pd.DataFrame): total = safe_sum(df)
-            df = p.get("total_atendimentos_conc")
-            if isinstance(df, pd.DataFrame): completed = safe_sum(df)
-            df = p.get("media_csat")
-            if isinstance(df, pd.DataFrame) and (col := find(df, ["avg"])): 
-                csat = pd.to_numeric(df[col], errors="coerce").mean()
-            df = p.get("tme_geral")
-            if isinstance(df, pd.DataFrame) and (col := find(df, ["mean_total"])): 
-                wait_h = to_hours(df[col]).mean()
-            evaluated = 0
-            df = p.get("csat")
-            if isinstance(df, pd.DataFrame) and (col := find(df, ["score_total"])): 
-                evaluated = pd.to_numeric(df[col], errors="coerce").sum()
-            coverage = evaluated / completed * 100 if completed and completed > 0 else np.nan
-            rows.append({
-                "Mês": m,
-                "Conclusão (%)": completed/total*100 if total else np.nan,
-                "TME (h)": wait_h,
-                "CSAT": csat,
-                "Cobertura (%)": coverage
-            })
-        comp = pd.DataFrame(rows)
-        c1, c2 = st.columns(2)
-        with c1:
-            st.plotly_chart(px.line(comp, x="Mês", y="Conclusão (%)", title="Conclusão"), use_container_width=True)
-            st.plotly_chart(px.line(comp, x="Mês", y="CSAT", title="CSAT Médio"), use_container_width=True)
-        with c2:
-            st.plotly_chart(px.line(comp, x="Mês", y="TME (h)", title="TME (h)"), use_container_width=True)
-            st.plotly_chart(px.line(comp, x="Mês", y="Cobertura (%)", title="Cobertura"), use_container_width=True)
-
-# 4) Dicionário
-with tabs[3]:
-    st.markdown("""
-### Dicionário de Dados
-- `_data_product__csat_*.csv` → CSAT por categoria  
-- `_data_product__media_csat_*.csv` → Média CSAT  
-- `tempo_medio_de_atendimento_por_canal_*.csv` → TMA por canal  
-- `tempo_medio_de_atendimento_*.csv` → TMA geral  
-- `tempo_medio_de_espera_*.csv` → TME geral  
-- `total_de_atendimentos_*.csv` → Total de atendimentos  
-- `total_de_atendimentos_concluidos_*.csv` → Atendimentos concluídos  
-""")
+                st.plotly_chart(px.bar(dfc
