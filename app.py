@@ -1,6 +1,4 @@
-# app.py — Dashboard CSAT (CSV) — GitHub + Upload (FUNCIONA COM TIMESTAMP)
-# Corrige regex para detectar mês mesmo com timestamp: 2025-11-05T16_58_03.csv
-
+# app.py — Dashboard CSAT (CSV) — GitHub + Upload — DEBUG VISUAL + FORÇA CARREGAMENTO
 from __future__ import annotations
 import os, re
 from io import BytesIO, StringIO
@@ -13,7 +11,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-# ====================== Config ======================
+# ====================== Config & Secrets ======================
 def _get_secret(name: str, default: str = "") -> str:
     try:
         return st.secrets.get(name, os.getenv(name, default))
@@ -22,12 +20,13 @@ def _get_secret(name: str, default: str = "") -> str:
 
 GH_REPO = _get_secret("GITHUB_DATA_REPO", "grupoperfil-glitch/csat-dashboard-data")
 GH_BRANCH = _get_secret("GITHUB_DATA_BRANCH", "main")
-GH_PATH = _get_secret("GITHUB_DATA_PATH", "data").strip("/")
+GH_PATH = _get_secret("GITHUB_DATA_PATH", "data").strip("/")  # <-- AJUSTE AQUI
 GH_TOKEN = _get_secret("GITHUB_DATA_TOKEN", "")
 RAW_ZIP_URL = f"https://codeload.github.com/{GH_REPO}/zip/refs/heads/{GH_BRANCH}"
 
 LOCAL_STORE_DIR = "data_store"
 LAST_GH_STATUS: List[str] = []
+DEBUG_FILES: List[str] = []
 
 def ensure_dir(p: str) -> None:
     os.makedirs(p, exist_ok=True)
@@ -35,7 +34,7 @@ def ensure_dir(p: str) -> None:
 def month_key(y: int, m: int) -> str:
     return f"{y:04d}-{m:02d}"
 
-# ====================== Leitura CSV ======================
+# ====================== Leitura de CSV ======================
 def load_csv(file: BytesIO | str) -> pd.DataFrame:
     try:
         content = file.read().decode('utf-8') if isinstance(file, BytesIO) else file
@@ -73,52 +72,65 @@ def to_hours(series: pd.Series) -> pd.Series:
     out.loc[~has_colon] = num / 3600.0
     return out
 
-# ====================== Mapeamento (SEUS ARQUIVOS EXATOS) ======================
+# ====================== Mapeamento ======================
 KEYS = {
-    "csat": ["data_product__csat", "csat"],
-    "media_csat": ["data_product__media_csat", "media_csat"],
-    "tma_por_canal": ["tempo_medio_de_atendimento_por_canal"],
-    "tma_geral": ["tempo_medio_de_atendimento"],
-    "tme_geral": ["tempo_medio_de_espera"],
-    "total_atendimentos": ["total_de_atendimentos"],
-    "total_atendimentos_conc": ["total_de_atendimentos_concluidos", "total_de_atendimentos_concluídos"],
+    "csat": ["csat_by_cat", "csat", "data_product__csat"],
+    "media_csat": ["csat_avg", "data_product__media_csat"],
+    "tma_por_canal": ["by_channel", "tempo_medio_de_atendimento_por_canal"],
+    "tma_geral": ["handle_avg", "tempo_medio_de_atendimento"],
+    "tme_geral": ["wait_avg", "tempo_medio_de_espera"],
+    "total_atendimentos": ["total", "total_de_atendimentos"],
+    "total_atendimentos_conc": ["completed", "total_de_atendimentos_concluidos"],
 }
 
 def detect_kind(filename: str) -> Optional[str]:
-    low = filename.lower()
+    low = filename.lower().replace('.csv', '')
     for kind, tokens in KEYS.items():
         for t in tokens:
             if t in low:
                 return kind
     return None
 
-# CORRIGIDO: aceita 2025-11-05T16_58_03 → pega 2025-11
 def extract_month(s: str) -> Optional[str]:
-    m = re.search(r"(\d{4}-\d{2})(?:-\d{2}T|\.|\_|$)", s)
-    return m.group(1) if m else None
+    m = re.search(r"\d{4}-\d{2}", s)
+    return m.group(0) if m else None
 
-# ====================== GitHub ZIP ======================
+# ====================== GitHub ZIP + DEBUG ======================
 def fetch_zip() -> Optional[bytes]:
     headers = {"Authorization": f"token {GH_TOKEN}"} if GH_TOKEN else {}
     try:
         r = requests.get(RAW_ZIP_URL, headers=headers, timeout=120)
         LAST_GH_STATUS.append(f"ZIP → {r.status_code}")
-        return r.content if r.status_code == 200 else None
+        if r.status_code == 200:
+            return r.content
+        else:
+            LAST_GH_STATUS.append(f"Erro HTTP: {r.status_code}")
+            return None
     except Exception as e:
-        LAST_GH_STATUS.append(f"ERR: {e}")
+        LAST_GH_STATUS.append(f"Exceção: {e}")
         return None
 
 def group_by_month(zf: ZipFile) -> Dict[str, List[str]]:
     names = zf.namelist()
+    DEBUG_FILES.extend(names[:50])  # Mostra primeiros 50 arquivos
     root = names[0].split("/")[0] if names else ""
     prefix = f"{root}/{GH_PATH}/" if GH_PATH else f"{root}/"
+    LAST_GH_STATUS.append(f"PREFIX: {prefix}")
+    
     months: Dict[str, List[str]] = {}
     for n in names:
-        if not n.lower().endswith(".csv") or not n.startswith(prefix):
+        if not n.lower().endswith(".csv"):
             continue
-        month = extract_month(n)
+        # Tenta com prefix
+        if GH_PATH and n.startswith(prefix):
+            rel = n[len(prefix):]
+        else:
+            rel = n[len(root)+1:] if n.startswith(root + "/") else n
+        
+        month = extract_month(rel) or extract_month(os.path.basename(n))
         if month:
             months.setdefault(month, []).append(n)
+            LAST_GH_STATUS.append(f"CSV → {month}: {os.path.basename(n)}")
     return months
 
 def read_month(zf: ZipFile, paths: List[str]) -> dict:
@@ -132,9 +144,13 @@ def read_month(zf: ZipFile, paths: List[str]) -> dict:
         latest = sorted(lst)[-1]
         try:
             df = load_csv_from_bytes(zf.read(latest))
-            payload[kind] = df
+            if not df.empty:
+                payload[kind] = df
+                LAST_GH_STATUS.append(f"LOADED: {kind} → {len(df)} linhas")
+            else:
+                LAST_GH_STATUS.append(f"EMPTY: {latest}")
         except Exception as e:
-            LAST_GH_STATUS.append(f"CSV falhou {latest}: {e}")
+            LAST_GH_STATUS.append(f"FAIL {kind}: {e}")
     return build_by_channel(payload)
 
 def build_by_channel(payload: dict) -> dict:
@@ -146,8 +162,6 @@ def build_by_channel(payload: dict) -> dict:
         merged = merged.merge(df, on="Canal", how="outer")
     if (col := find(merged, ["Média CSAT", "avg"])):
         merged.rename(columns={col: "Média CSAT"}, inplace=True)
-    if (col := find(merged, ["Respostas CSAT", "score_total"])):
-        merged.rename(columns={col: "Respostas CSAT"}, inplace=True)
     payload["by_channel"] = merged
     return payload
 
@@ -168,7 +182,7 @@ def load_github(force: bool = False) -> Tuple[int, int]:
                 loaded += 1
         return loaded, files
 
-# ====================== Local + Upload ======================
+# ====================== Local Fallback ======================
 def load_local() -> int:
     if not os.path.isdir(LOCAL_STORE_DIR):
         return 0
@@ -192,8 +206,9 @@ def load_local() -> int:
                     loaded += 1
     return loaded
 
+# ====================== Upload ======================
 def upload_file(file, kind: str) -> Optional[pd.DataFrame]:
-    if not file or not any(tok in file.name.lower() for tok in KEYS.get(kind, [])):
+    if not file:
         return None
     try:
         return load_csv(file)
@@ -210,6 +225,7 @@ if "months" not in st.session_state:
 gh_m, gh_f = load_github()
 local_m = load_local()
 
+# Sidebar
 with st.sidebar:
     st.header("Mês")
     today = date.today()
@@ -218,7 +234,9 @@ with st.sidebar:
     mk = month_key(year, month)
 
     st.markdown("**GitHub**")
-    st.write(f"`{GH_REPO}` → `{GH_PATH}`")
+    st.write(f"`{GH_REPO}`")
+    st.write(f"Branch: `{GH_BRANCH}`")
+    st.write(f"Pasta: `{GH_PATH or 'raiz'}`")
     if GH_TOKEN:
         st.success("Token OK")
     else:
@@ -226,17 +244,17 @@ with st.sidebar:
 
     if st.button("Recarregar GitHub"):
         LAST_GH_STATUS.clear()
+        DEBUG_FILES.clear()
         m, f = load_github(force=True)
         st.success(f"{m} meses, {f} arquivos CSV")
 
-    with st.expander("Log"):
-        st.write(f"GitHub: {gh_m} | Local: {local_m}")
-        if LAST_GH_STATUS:
-            st.code("\n".join(LAST_GH_STATUS[-10:]))
-        if st.session_state["months"]:
-            st.write("**Meses carregados:**")
-            for m in sorted(st.session_state["months"].keys()):
-                st.write(f"{m}")
+    with st.expander("DEBUG COMPLETO"):
+        st.write("**Status ZIP:**")
+        st.code("\n".join(LAST_GH_STATUS))
+        st.write("**Primeiros 20 arquivos no ZIP:**")
+        st.code("\n".join(DEBUG_FILES[:20]))
+        st.write("**Meses detectados:**")
+        st.write(list(st.session_state["months"].keys()))
 
     st.subheader("Upload CSV")
     uploads = {
@@ -262,9 +280,9 @@ with st.sidebar:
                 df.to_csv(os.path.join(folder, f"{k}.csv"), index=False)
             st.success(f"{len(partial)} arquivos salvos")
         else:
-            st.warning("Nenhum arquivo válido")
+            st.warning("Nenhum arquivo")
 
-# ====================== Helpers ======================
+# Helpers
 def get_payload() -> dict:
     return st.session_state["months"].get(mk, {})
 
@@ -288,5 +306,99 @@ SLA = {"completion": 90, "wait_h": 24, "csat": 4.0, "coverage": 75}
 
 tabs = st.tabs(["Visão Geral", "Por Canal", "Comparativo Mensal", "Dicionário"])
 
-# [RESTANTE DO CÓDIGO É O MESMO — métricas, gráficos, etc.]
-# (código completo já enviado anteriormente — só substitua tudo)
+with tabs[0]:
+    st.subheader(f"Visão Geral — {mk}")
+    p = get_payload()
+    if not p:
+        st.info("Sem dados. Use Upload ou verifique GitHub.")
+    else:
+        total = completed = csat = wait_h = evaluated = coverage = np.nan
+        df = p.get("total_atendimentos")
+        if isinstance(df, pd.DataFrame): total = safe_sum(df)
+        df = p.get("total_atendimentos_conc")
+        if isinstance(df, pd.DataFrame): completed = safe_sum(df)
+        df = p.get("media_csat")
+        if isinstance(df, pd.DataFrame) and (col := find(df, ["avg"])): csat = pd.to_numeric(df[col], errors="coerce").mean()
+        df = p.get("tme_geral")
+        if isinstance(df, pd.DataFrame) and (col := find(df, ["mean_total"])): wait_h = to_hours(df[col]).mean()
+        df = p.get("csat")
+        if isinstance(df, pd.DataFrame) and (col := find(df, ["score_total"])): evaluated = pd.to_numeric(df[col], errors="coerce").sum()
+        coverage = evaluated / completed * 100 if completed and completed > 0 else np.nan
+        completion_pct = completed / total * 100 if total and total > 0 else np.nan
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Conclusão", f"{completion_pct:.1f}%" if not pd.isna(completion_pct) else "-", delta="OK" if completion_pct >= SLA["completion"] else "BAIXO")
+        c2.metric("1º Resp", f"{wait_h:.2f}h" if not pd.isna(wait_h) else "-", delta="OK" if wait_h < SLA["wait_h"] else "ALTO")
+        c3.metric("CSAT", f"{csat:.2f}" if not pd.isna(csat) else "-", delta="OK" if csat >= SLA["csat"] else "BAIXO")
+        c4.metric("Cobertura", f"{coverage:.1f}%" if not pd.isna(coverage) else "-", delta="OK" if coverage >= SLA["coverage"] else "BAIXO")
+
+        df_dist = p.get("csat")
+        if isinstance(df_dist, pd.DataFrame):
+            cat_col = find(df_dist, ["Categoria"])
+            val_col = find(df_dist, ["score_total"])
+            if cat_col and val_col:
+                dist = df_dist[[cat_col, val_col]].groupby(cat_col).sum().reset_index()
+                dist.columns = ["Categoria", "Total"]
+                order = ["Muito Insatisfeito", "Insatisfeito", "Neutro", "Satisfeito", "Muito Satisfeito"]
+                dist["Categoria"] = pd.Categorical(dist["Categoria"], order, ordered=True)
+                dist = dist.sort_values("Categoria")
+                fig = px.bar(dist, x="Categoria", y="Total", title="Distribuição CSAT")
+                st.plotly_chart(fig, use_container_width=True)
+
+with tabs[1]:
+    st.subheader(f"Por Canal — {mk}")
+    dfc = get_by_channel()
+    if dfc is None:
+        st.info("Sem dados por canal")
+    else:
+        channels = sorted(dfc["Canal"].unique())
+        sel = st.multiselect("Canais", channels, default=channels)
+        dfc = dfc[dfc["Canal"].isin(sel)]
+        col1, col2 = st.columns(2)
+        with col1:
+            if (col := find(dfc, ["Tempo médio de atendimento", "mean_total"])):
+                dfc["TMA (h)"] = to_hours(dfc[col])
+                st.plotly_chart(px.bar(dfc, x="Canal", y="TMA (h)", title="TMA por Canal"), use_container_width=True)
+        with col2:
+            if (col := find(dfc, ["Tempo médio de espera", "mean_wait"])):
+                dfc["TME (h)"] = to_hours(dfc[col])
+                st.plotly_chart(px.bar(dfc, x="Canal", y="TME (h)", title="TME por Canal"), use_container_width=True)
+
+with tabs[2]:
+    st.subheader("Comparativo Mensal")
+    months = sorted(st.session_state["months"].keys())
+    if len(months) < 2:
+        st.info("Mínimo 2 meses")
+    else:
+        rows = []
+        for m in months:
+            p = st.session_state["months"][m]
+            total = completed = csat = wait_h = coverage = np.nan
+            df = p.get("total_atendimentos")
+            if isinstance(df, pd.DataFrame): total = safe_sum(df)
+            df = p.get("total_atendimentos_conc")
+            if isinstance(df, pd.DataFrame): completed = safe_sum(df)
+            df = p.get("media_csat")
+            if isinstance(df, pd.DataFrame) and (col := find(df, ["avg"])): csat = pd.to_numeric(df[col], errors="coerce").mean()
+            df = p.get("tme_geral")
+            if isinstance(df, pd.DataFrame) and (col := find(df, ["mean_total"])): wait_h = to_hours(df[col]).mean()
+            evaluated = p.get("csat", pd.DataFrame()).apply(lambda x: pd.to_numeric(x, errors='coerce')).sum().sum() if "csat" in p else 0
+            coverage = evaluated / completed * 100 if completed and completed > 0 else np.nan
+            rows.append({"Mês": m, "Conclusão (%)": completed/total*100 if total else np.nan, "TME (h)": wait_h, "CSAT": csat, "Cobertura (%)": coverage})
+        comp = pd.DataFrame(rows)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.plotly_chart(px.line(comp, x="Mês", y="Conclusão (%)", title="Conclusão"), use_container_width=True)
+            st.plotly_chart(px.line(comp, x="Mês", y="CSAT", title="CSAT Médio"), use_container_width=True)
+        with c2:
+            st.plotly_chart(px.line(comp, x="Mês", y="TME (h)", title="TME (h)"), use_container_width=True)
+            st.plotly_chart(px.line(comp, x="Mês", y="Cobertura (%)", title="Cobertura"), use_container_width=True)
+
+with tabs[3]:
+    st.markdown("""
+### Dicionário
+- `_data_product__csat_*.csv` → CSAT por categoria  
+- `_data_product__media_csat_*.csv` → Média CSAT  
+- `tempo_medio_de_atendimento_por_canal_*.csv` → TMA por canal  
+- `csat_avg.csv`, `handle_avg.csv` → GitHub antigo  
+""")
