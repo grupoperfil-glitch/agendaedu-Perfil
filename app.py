@@ -4,7 +4,7 @@
 # GITHUB_DATA_REPO = "grupoperfil-glitch/csat-dashboard-data"
 # GITHUB_DATA_PATH = "data"
 # GITHUB_DATA_BRANCH = "main"
-# GITHUB_DATA_TOKEN = "ghp_..."  # opcional, mas evita rate limit
+# GITHUB_DATA_TOKEN = "ghp_..."  # opcional
 
 from __future__ import annotations
 import os, re
@@ -61,11 +61,12 @@ def normalize_canal_column(df: pd.DataFrame) -> pd.DataFrame:
             return df.rename(columns={lower[alias]: "Canal"})
     return df
 
-def find(b: pd.DataFrame, cols: List[str]) -> Optional[str]:
+def find_best_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     lower = {str(c).strip().lower(): c for c in df.columns}
-    for c in cols:
-        if c.strip().lower() in lower:
-            return lower[c.strip().lower()]
+    for c in candidates:
+        k = c.strip().lower()
+        if k in lower:
+            return lower[k]
     return None
 
 def to_hours(series: pd.Series) -> pd.Series:
@@ -116,18 +117,24 @@ def fetch_zip() -> Optional[bytes]:
 
 def group_by_month(zf: ZipFile) -> Dict[str, List[str]]:
     names = zf.namelist()
-    root = names[0].split("/")[0] if names else ""
+    root = names[0].split("/")[0] if names else ""  # ex: csat-dashboard-data-main
     prefix = f"{root}/{GH_PATH}/" if GH_PATH else f"{root}/"
+    LAST_GH_STATUS.append(f"Prefixo ZIP: {prefix} (total arquivos: {len(names)})")
     months: Dict[str, List[str]] = {}
     for n in names:
         if not n.lower().endswith(".xlsx") or not n.startswith(prefix):
             continue
-        parts = n.split("/")
-        month = next((extract_month(p) for p in parts if extract_month(p)), None)
+        # Extrai mês do path OU nome do arquivo
+        month = None
+        for part in n.split("/"):
+            month = extract_month(part)
+            if month:
+                break
         if not month:
             month = extract_month(os.path.basename(n))
         if month:
             months.setdefault(month, []).append(n)
+            LAST_GH_STATUS.append(f"Arquivo para {month}: {n}")
     return months
 
 def read_month(zf: ZipFile, paths: List[str]) -> dict:
@@ -142,8 +149,9 @@ def read_month(zf: ZipFile, paths: List[str]) -> dict:
         try:
             df = load_xlsx_from_bytes(zf.read(latest))
             payload[kind] = df
-        except Exception:
-            LAST_GH_STATUS.append(f"XLSX falhou: {latest}")
+            LAST_GH_STATUS.append(f"Lido {kind}: {latest}")
+        except Exception as e:
+            LAST_GH_STATUS.append(f"XLSX falhou {latest}: {e}")
     return build_by_channel(payload)
 
 def build_by_channel(payload: dict) -> dict:
@@ -154,10 +162,12 @@ def build_by_channel(payload: dict) -> dict:
     for df in dfs[1:]:
         merged = merged.merge(df, on="Canal", how="outer")
     # Renomeia colunas comuns
-    if (col := find(merged, ["Média CSAT", "media csat", "avg"])) and col != "Média CSAT":
-        merged.rename(columns={col: "Média CSAT"}, inplace=True)
-    if (col := find(merged, ["Respostas CSAT", "score_total", "qtd", "qtde"])) and col != "Respostas CSAT":
-        merged.rename(columns={col: "Respostas CSAT"}, inplace=True)
+    mcol = find_best_column(merged, ["Média CSAT", "media csat", "avg", "media"])
+    if mcol and mcol != "Média CSAT":
+        merged = merged.rename(columns={mcol: "Média CSAT"})
+    ccol = find_best_column(merged, ["Respostas CSAT", "score_total", "qtd", "qtde"])
+    if ccol and ccol != "Respostas CSAT":
+        merged = merged.rename(columns={ccol: "Respostas CSAT"})
     payload["by_channel"] = merged
     return payload
 
@@ -169,6 +179,7 @@ def load_github(force: bool = False) -> Tuple[int, int]:
         grouped = group_by_month(zf)
         loaded = 0
         files = sum(len(v) for v in grouped.values())
+        LAST_GH_STATUS.append(f"Meses encontrados: {list(sorted(grouped.keys()))} (total arquivos: {files})")
         for m, paths in sorted(grouped.items()):
             if not force and m in st.session_state.get("months", {}):
                 continue
@@ -195,8 +206,8 @@ def load_local() -> int:
                             try:
                                 df = load_xlsx(os.path.join(path, f))
                                 payload[kind] = df
-                            except:
-                                pass
+                            except Exception as e:
+                                LAST_GH_STATUS.append(f"Local falhou {f}: {e}")
                 if payload:
                     st.session_state.setdefault("months", {})[name] = build_by_channel(payload)
                     loaded += 1
@@ -204,11 +215,17 @@ def load_local() -> int:
 
 # ====================== Upload ======================
 def upload_file(file, kind: str) -> Optional[pd.DataFrame]:
-    if not file or not any(tok in file.name.lower() for tok in KEYS.get(kind, [])):
+    if not file:
+        return None
+    if not any(tok in file.name.lower() for tok in KEYS.get(kind, [])):
+        st.warning(f"Nome inválido para {kind}: {file.name} (deve conter '{KEYS[kind][0]}')")
         return None
     try:
-        return load_xlsx(file)
-    except:
+        df = load_xlsx(file)
+        LAST_GH_STATUS.append(f"Upload OK: {kind} ({file.name})")
+        return df
+    except Exception as e:
+        st.error(f"Erro ao ler {file.name}: {e}")
         return None
 
 # ====================== App ======================
@@ -241,23 +258,23 @@ with st.sidebar:
         m, f = load_github(force=True)
         st.success(f"{m} meses, {f} arquivos")
 
-    with st.expander("Log"):
-        st.write(f"GitHub: {gh_m} | Local: {local_m}")
+    with st.expander("Log Detalhado"):
+        st.write(f"GitHub: {gh_m} meses | {gh_f} arquivos | Local: {local_m}")
         if LAST_GH_STATUS:
-            st.code("\n".join(LAST_GH_STATUS[-10:]))
+            st.code("\n".join(LAST_GH_STATUS[-20:]))  # Últimos 20 logs
 
-    st.subheader("Upload")
+    st.subheader("Upload Individual")
     uploads = {
-        "csat": st.file_uploader("CSAT", type="xlsx", key="u1"),
-        "media_csat": st.file_uploader("Média CSAT", type="xlsx", key="u2"),
-        "tma_por_canal": st.file_uploader("TMA por Canal", type="xlsx", key="u3"),
-        "tma_geral": st.file_uploader("TMA Geral", type="xlsx", key="u4"),
-        "tme_geral": st.file_uploader("TME Geral", type="xlsx", key="u5"),
-        "total_atendimentos": st.file_uploader("Total", type="xlsx", key="u6"),
-        "total_atendimentos_conc": st.file_uploader("Concluídos", type="xlsx", key="u7"),
+        "csat": st.file_uploader("1) CSAT (data_product__csat_*.xlsx)", type="xlsx", key="u1"),
+        "media_csat": st.file_uploader("2) Média CSAT (data_product__media_csat_*.xlsx)", type="xlsx", key="u2"),
+        "tma_por_canal": st.file_uploader("3) TMA por Canal (*.por_canal.xlsx)", type="xlsx", key="u3"),
+        "tma_geral": st.file_uploader("4) TMA Geral (*.atendimento.xlsx)", type="xlsx", key="u4"),
+        "tme_geral": st.file_uploader("5) TME Geral (*.espera.xlsx)", type="xlsx", key="u5"),
+        "total_atendimentos": st.file_uploader("6) Total Atendimentos (*.total.xlsx)", type="xlsx", key="u6"),
+        "total_atendimentos_conc": st.file_uploader("7) Concluídos (*.concluidos.xlsx)", type="xlsx", key="u7"),
     }
 
-    if st.button("Salvar no mês"):
+    if st.button("Salvar no Mês Selecionado"):
         partial = {k: upload_file(f, k) for k, f in uploads.items() if upload_file(f, k) is not None}
         if partial:
             payload = st.session_state["months"].get(mk, {})
@@ -268,9 +285,9 @@ with st.sidebar:
             ensure_dir(folder)
             for k, df in partial.items():
                 df.to_excel(os.path.join(folder, f"{k}.xlsx"), index=False)
-            st.success(f"{len(partial)} arquivos salvos")
+            st.success(f"{len(partial)} arquivos salvos em {mk}")
         else:
-            st.warning("Nenhum arquivo válido")
+            st.warning("Nenhum arquivo válido enviado")
 
 # Helpers
 def get_payload() -> dict:
@@ -282,12 +299,23 @@ def get_by_channel() -> Optional[pd.DataFrame]:
     if isinstance(df, pd.DataFrame) and not df.empty:
         return normalize_canal_column(df.copy())
     for v in p.values():
-        if isinstance(v, pd.DataFrame) and "Canal" in normalize_canal_column(v).columns:
-            return normalize_canal_column(v.copy())
+        if isinstance(v, pd.DataFrame):
+            ndf = normalize_canal_column(v)
+            if "Canal" in ndf.columns:
+                return ndf.copy()
     return None
 
 # SLAs
-SLA = {"completion": 90, "wait_h": 24, "csat": 4.0, "coverage": 75}
+SLA = {"completion": 90.0, "wait_h": 24.0, "csat": 4.0, "coverage": 75.0}
+
+def get_sla_delta(value: float, target: float, greater_better: bool = True) -> Optional[str]:
+    if pd.isna(value):
+        return None
+    diff = (value - target) / target * 100 if target != 0 else 0
+    if greater_better:
+        return "normal" if value >= target else ("warning" if value > target * 0.95 else "inverse")
+    else:
+        return "normal" if value <= target else ("warning" if value < target * 1.05 else "inverse")
 
 # Tabs
 tabs = st.tabs(["Visão Geral", "Por Canal", "Comparativo Mensal", "Dicionário"])
@@ -297,49 +325,67 @@ with tabs[0]:
     st.subheader(f"Visão Geral — {mk}")
     p = get_payload()
     if not p:
-        st.info("Sem dados")
+        st.info(f"Nenhum dado carregado para {mk}. Meses disponíveis: {sorted(st.session_state['months'].keys())}")
     else:
         total = completed = csat = wait_h = evaluated = coverage = np.nan
 
         df = p.get("total_atendimentos")
-        if isinstance(df, pd.DataFrame): total = int(pd.to_numeric(df.select_dtypes("number"), errors="coerce").sum().sum())
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            total = int(pd.to_numeric(df.select_dtypes(include=[np.number]), errors="coerce").sum().sum())
 
         df = p.get("total_atendimentos_conc")
-        if isinstance(df, pd.DataFrame): completed = int(pd.to_numeric(df.select_dtypes("number"), errors="coerce").sum().sum())
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            completed = int(pd.to_numeric(df.select_dtypes(include=[np.number]), errors="coerce").sum().sum())
 
         df = p.get("media_csat")
-        if isinstance(df, pd.DataFrame) and (col := find(df, ["avg", "Média CSAT"])):
-            csat = pd.to_numeric(df[col], errors="coerce").mean()
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            col = find_best_column(df, ["avg", "Média CSAT", "media"])
+            if col:
+                csat = pd.to_numeric(df[col], errors="coerce").mean()
 
         df = p.get("tme_geral")
-        if isinstance(df, pd.DataFrame) and (col := find(df, ["mean_total", "Tempo médio de espera"])):
-            wait_h = to_hours(df[col]).mean()
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            col = find_best_column(df, ["mean_total", "Tempo médio de espera", "mean_wait HH:MM:SS"])
+            if col:
+                wait_h = to_hours(df[col]).mean()
 
         df = p.get("csat")
-        if isinstance(df, pd.DataFrame) and (col := find(df, ["score_total", "Respostas CSAT"])):
-            evaluated = int(pd.to_numeric(df[col], errors="coerce").sum())
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            col = find_best_column(df, ["score_total", "Respostas CSAT", "qtd"])
+            if col:
+                evaluated = int(pd.to_numeric(df[col], errors="coerce").sum())
 
-        coverage = evaluated / completed * 100 if completed and completed > 0 else np.nan
-        completion_pct = completed / total * 100 if total and total > 0 else np.nan
+        coverage = evaluated / completed * 100 if completed > 0 else np.nan
+        completion_pct = completed / total * 100 if total > 0 else np.nan
 
+        # Métricas com deltas
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Conclusão >90%", f"{completion_pct:.1f}%" if not pd.isna(completion_pct) else "-", delta="OK" if completion_pct >= SLA["completion"] else "BAIXO")
-        c2.metric("1º Resp <24h", f"{wait_h:.2f}h" if not pd.isna(wait_h) else "-", delta="OK" if wait_h < SLA["wait_h"] else "ALTO")
-        c3.metric("CSAT ≥4.0", f"{csat:.2f}" if not pd.isna(csat) else "-", delta="OK" if csat >= SLA["csat"] else "BAIXO")
-        c4.metric("Cobertura ≥75%", f"{coverage:.1f}%" if not pd.isna(coverage) else "-", delta="OK" if coverage >= SLA["coverage"] else "BAIXO")
+        with c1:
+            delta = get_sla_delta(completion_pct, SLA["completion"])
+            st.metric("Taxa de Conclusão >90%", f"{completion_pct:.1f}%" if not pd.isna(completion_pct) else "-", delta=f"{completion_pct - SLA['completion']:.1f}%" if not pd.isna(completion_pct) else None, delta_color=delta)
+        with c2:
+            delta = get_sla_delta(wait_h, SLA["wait_h"], greater_better=False)
+            st.metric("Tempo 1º Resp <24h", f"{wait_h:.2f}h" if not pd.isna(wait_h) else "-", delta=f"{wait_h - SLA['wait_h']:.1f}h" if not pd.isna(wait_h) else None, delta_color=delta)
+        with c3:
+            delta = get_sla_delta(csat, SLA["csat"])
+            st.metric("CSAT Médio ≥4.0", f"{csat:.2f}" if not pd.isna(csat) else "-", delta=f"{csat - SLA['csat']:.2f}" if not pd.isna(csat) else None, delta_color=delta)
+        with c4:
+            delta = get_sla_delta(coverage, SLA["coverage"])
+            st.metric("Cobertura Avaliações ≥75%", f"{coverage:.1f}%" if not pd.isna(coverage) else "-", delta=f"{coverage - SLA['coverage']:.1f}%" if not pd.isna(coverage) else None, delta_color=delta)
 
-        # Distribuição CSAT
+        # Distribuição CSAT ordenada
         df_dist = p.get("csat")
-        if isinstance(df_dist, pd.DataFrame):
-            cat_col = find(df_dist, ["Categoria"])
-            val_col = find(df_dist, ["score_total", "Respostas CSAT"])
+        if isinstance(df_dist, pd.DataFrame) and not df_dist.empty:
+            cat_col = find_best_column(df_dist, ["Categoria"])
+            val_col = find_best_column(df_dist, ["score_total", "Respostas CSAT"])
             if cat_col and val_col:
-                dist = df_dist[[cat_col, val_col]].groupby(cat_col).sum().reset_index()
+                dist = df_dist[[cat_col, val_col]].groupby(cat_col)[val_col].sum().reset_index()
                 dist.columns = ["Categoria", "Total"]
                 order = ["Muito Insatisfeito", "Insatisfeito", "Neutro", "Satisfeito", "Muito Satisfeito"]
-                dist["Categoria"] = pd.Categorical(dist["Categoria"], order, ordered=True)
-                dist = dist.sort_values("Categoria")
-                fig = px.bar(dist, x="Categoria", y="Total", title="Distribuição CSAT")
+                dist["Categoria"] = pd.Categorical(dist["Categoria"], categories=order, ordered=True)
+                dist = dist.sort_values("Categoria").fillna(0)
+                fig = px.bar(dist, x="Categoria", y="Total", title="Distribuição CSAT (Ordem Crescente de Satisfação)")
+                fig.update_layout(xaxis_title="", yaxis_title="Total Avaliações")
                 st.plotly_chart(fig, use_container_width=True)
 
 # 2) Por Canal
@@ -347,75 +393,113 @@ with tabs[1]:
     st.subheader(f"Por Canal — {mk}")
     dfc = get_by_channel()
     if dfc is None:
-        st.info("Sem dados por canal")
+        st.info("Sem dados por canal para este mês.")
     else:
-        channels = sorted(dfc["Canal"].unique())
-        sel = st.multiselect("Canais", channels, default=channels)
-        dfc = dfc[dfc["Canal"].isin(sel)]
+        channels = sorted(dfc["Canal"].dropna().unique())
+        sel = st.multiselect("Filtrar Canais (selecione um ou mais)", channels, default=channels)
+        if sel:
+            dfc = dfc[dfc["Canal"].isin(sel)]
 
         col1, col2 = st.columns(2)
         with col1:
-            if (col := find(dfc, ["Tempo médio de atendimento", "mean_total"])):
-                dfc["TMA (h)"] = to_hours(dfc[col])
+            tma_col = find_best_column(dfc, ["Tempo médio de atendimento", "mean_total", "handle_seconds", "mean_total HH:MM:SS"])
+            if tma_col:
+                dfc["TMA (h)"] = to_hours(dfc[tma_col])
                 st.plotly_chart(px.bar(dfc, x="Canal", y="TMA (h)", title="TMA por Canal (horas)"), use_container_width=True)
+            else:
+                st.warning("Coluna de TMA não encontrada.")
         with col2:
-            if (col := find(dfc, ["Tempo médio de espera", "mean_wait"])):
-                dfc["TME (h)"] = to_hours(dfc[col])
+            tme_col = find_best_column(dfc, ["Tempo médio de espera", "mean_wait", "wait_seconds", "mean_wait HH:MM:SS"])
+            if tme_col:
+                dfc["TME (h)"] = to_hours(dfc[tme_col])
                 st.plotly_chart(px.bar(dfc, x="Canal", y="TME (h)", title="TME por Canal (horas)"), use_container_width=True)
+            else:
+                st.info("Coluna de TME não encontrada.")
 
-        if (col := find(dfc, ["Média CSAT"])):
-            st.markdown("### CSAT Médio por Canal")
-            st.plotly_chart(px.bar(dfc, x="Canal", y=col, title="CSAT Médio"), use_container_width=True)
+        csat_col = find_best_column(dfc, ["Média CSAT", "avg", "media"])
+        if csat_col:
+            st.markdown("### CSAT Médio por Canal (Filtrado)")
+            st.plotly_chart(px.bar(dfc, x="Canal", y=csat_col, title="CSAT Médio por Canal"), use_container_width=True)
+
+        st.dataframe(dfc, use_container_width=True)
 
 # 3) Comparativo Mensal
 with tabs[2]:
-    st.subheader("Comparativo Mensal")
+    st.subheader("Comparativo Mensal (KPIs ao Longo dos Meses)")
     months = sorted(st.session_state["months"].keys())
     if len(months) < 2:
-        st.info("Mínimo 2 meses")
+        st.info("Carregue pelo menos 2 meses para comparativo.")
     else:
         rows = []
         for m in months:
             p = st.session_state["months"][m]
-            # (reutiliza lógica da Visão Geral)
-            total = completed = csat = wait_h = coverage = np.nan
+            total = completed = csat = wait_h = evaluated = coverage = np.nan
+
             df = p.get("total_atendimentos")
-            if isinstance(df, pd.DataFrame): total = int(pd.to_numeric(df.select_dtypes("number"), errors="coerce").sum().sum())
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                total = int(pd.to_numeric(df.select_dtypes(include=[np.number]), errors="coerce").sum().sum())
+
             df = p.get("total_atendimentos_conc")
-            if isinstance(df, pd.DataFrame): completed = int(pd.to_numeric(df.select_dtypes("number"), errors="coerce").sum().sum())
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                completed = int(pd.to_numeric(df.select_dtypes(include=[np.number]), errors="coerce").sum().sum())
+
             df = p.get("media_csat")
-            if isinstance(df, pd.DataFrame) and (col := find(df, ["avg"])): csat = pd.to_numeric(df[col], errors="coerce").mean()
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                col = find_best_column(df, ["avg", "Média CSAT"])
+                if col:
+                    csat = pd.to_numeric(df[col], errors="coerce").mean()
+
             df = p.get("tme_geral")
-            if isinstance(df, pd.DataFrame) and (col := find(df, ["mean_total"])): wait_h = to_hours(df[col]).mean()
-            evaluated = 0
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                col = find_best_column(df, ["mean_total", "Tempo médio de espera"])
+                if col:
+                    wait_h = to_hours(df[col]).mean()
+
             df = p.get("csat")
-            if isinstance(df, pd.DataFrame) and (col := find(df, ["score_total"])): evaluated = int(pd.to_numeric(df[col], errors="coerce").sum())
-            coverage = evaluated / completed * 100 if completed and completed > 0 else np.nan
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                col = find_best_column(df, ["score_total", "Respostas CSAT"])
+                if col:
+                    evaluated = int(pd.to_numeric(df[col], errors="coerce").sum())
+
+            coverage = evaluated / completed * 100 if completed > 0 else np.nan
+            completion_pct = completed / total * 100 if total > 0 else np.nan
+
             rows.append({
                 "Mês": m,
-                "Conclusão (%)": completed/total*100 if total else np.nan,
+                "Conclusão (%)": completion_pct,
                 "TME (h)": wait_h,
                 "CSAT": csat,
                 "Cobertura (%)": coverage
             })
         comp = pd.DataFrame(rows)
+        st.dataframe(comp, use_container_width=True)
+
         c1, c2 = st.columns(2)
         with c1:
-            st.plotly_chart(px.line(comp, x="Mês", y="Conclusão (%)", title="Conclusão"), use_container_width=True)
-            st.plotly_chart(px.line(comp, x="Mês", y="CSAT", title="CSAT Médio"), use_container_width=True)
+            st.plotly_chart(px.line(comp, x="Mês", y="Conclusão (%)", markers=True, title="Taxa de Conclusão (%)"), use_container_width=True)
+            st.plotly_chart(px.line(comp, x="Mês", y="CSAT", markers=True, title="CSAT Médio"), use_container_width=True)
         with c2:
-            st.plotly_chart(px.line(comp, x="Mês", y="TME (h)", title="TME (h)"), use_container_width=True)
-            st.plotly_chart(px.line(comp, x="Mês", y="Cobertura (%)", title="Cobertura"), use_container_width=True)
+            st.plotly_chart(px.line(comp, x="Mês", y="TME (h)", markers=True, title="TME (horas)"), use_container_width=True)
+            st.plotly_chart(px.line(comp, x="Mês", y="Cobertura (%)", markers=True, title="Cobertura de Avaliações (%)"), use_container_width=True)
 
 # 4) Dicionário
 with tabs[3]:
+    st.subheader("Dicionário de Dados")
     st.markdown("""
-    ### Dicionário de Dados
-    - `data_product__csat_*.xlsx` → CSAT por categoria  
-    - `data_product__media_csat_*.xlsx` → CSAT médio  
-    - `tempo_medio_de_atendimento_por_canal_*.xlsx` → TMA por canal  
-    - `tempo_medio_de_atendimento_*.xlsx` → TMA geral  
-    - `tempo_medio_de_espera_*.xlsx` → TME geral  
-    - `total_de_atendimentos_*.xlsx` → Total  
-    - `total_de_atendimentos_concluidos_*.xlsx` → Concluídos  
-    """)
+    ### Arquivos Esperados (.xlsx na pasta `data/`)
+    - `data_product__csat_YYYY-MM.xlsx` → CSAT por categoria (colunas: Categoria, score_total)
+    - `data_product__media_csat_YYYY-MM.xlsx` → CSAT médio (colunas: avg ou Média CSAT)
+    - `tempo_medio_de_atendimento_por_canal_YYYY-MM.xlsx` → TMA por canal (Canal, Tempo médio de atendimento, etc.)
+    - `tempo_medio_de_atendimento_YYYY-MM.xlsx` → TMA geral (mean_total em HH:MM:SS ou segundos)
+    - `tempo_medio_de_espera_YYYY-MM.xlsx` → TME geral (mean_total em HH:MM:SS ou segundos)
+    - `total_de_atendimentos_YYYY-MM.xlsx` → Total (total_tickets numérico)
+    - `total_de_atendimentos_concluidos_YYYY-MM.xlsx` → Concluídos (total_tickets numérico)
+
+    ### Colunas Reconhecidas
+    - **Canais:** Canal (ou categoria/canal/channel → renomeado)
+    - **Tempos:** Convertidos para horas (HH:MM:SS ou segundos → /3600)
+    - **CSAT:** Média CSAT (avg/media), score_total (contagem)
+    - **SLAs:** Conclusão >90%, TME <24h, CSAT ≥4.0, Cobertura ≥75%
+
+    Meses carregados: {sorted(st.session_state["months"].keys())}
+    """.format(sorted(st.session_state["months"].keys())))
