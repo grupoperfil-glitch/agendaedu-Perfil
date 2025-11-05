@@ -1,7 +1,5 @@
 # app.py — Dashboard CSAT (CSV) — GitHub via ZIP + Upload Individual
-# Adaptado para estrutura CSV em pastas 2025-MM/ (ex: csat_avg.csv, handle_avg.csv)
-# Requisitos: pip install streamlit plotly pandas numpy requests
-
+# Corrigido: to_numeric + sum() em DataFrames numéricos
 from __future__ import annotations
 import os, re
 from io import BytesIO, StringIO
@@ -74,19 +72,19 @@ def to_hours(series: pd.Series) -> pd.Series:
     out.loc[~has_colon] = num / 3600.0
     return out
 
-# ====================== Mapeamento de Arquivos (adaptado para seus nomes CSV) ======================
+# ====================== Mapeamento de Arquivos ======================
 KEYS = {
-    "csat": ["csat_by_cat", "csat"],  # csat_by_cat.csv ou csat.csv
-    "media_csat": ["csat_avg", "media_csat"],  # csat_avg.csv
-    "tma_por_canal": ["by_channel", "tma_por_canal"],  # by_channel.csv
-    "tma_geral": ["handle_avg", "tma_geral"],  # handle_avg.csv
-    "tme_geral": ["wait_avg", "tme_geral"],  # wait_avg.csv
-    "total_atendimentos": ["total"],  # total.csv
-    "total_atendimentos_conc": ["completed"],  # completed.csv
+    "csat": ["csat_by_cat", "csat"],
+    "media_csat": ["csat_avg", "media_csat"],
+    "tma_por_canal": ["by_channel", "tma_por_canal"],
+    "tma_geral": ["handle_avg", "tma_geral"],
+    "tme_geral": ["wait_avg", "tme_geral"],
+    "total_atendimentos": ["total"],
+    "total_atendimentos_conc": ["completed"],
 }
 
 def detect_kind(filename: str) -> Optional[str]:
-    low = filename.lower().replace('.csv', '')  # Remove .csv para matching
+    low = filename.lower().replace('.csv', '')
     for kind, tokens in KEYS.items():
         for t in tokens:
             if t in low:
@@ -97,7 +95,7 @@ def extract_month(s: str) -> Optional[str]:
     m = re.search(r"\d{4}-\d{2}", s)
     return m.group(0) if m else None
 
-# ====================== GitHub ZIP (adaptado para CSV) ======================
+# ====================== GitHub ZIP ======================
 def fetch_zip() -> Optional[bytes]:
     headers = {"Authorization": f"token {GH_TOKEN}"} if GH_TOKEN else {}
     try:
@@ -171,7 +169,7 @@ def load_github(force: bool = False) -> Tuple[int, int]:
                 loaded += 1
         return loaded, files
 
-# ====================== Local Fallback (adaptado para CSV) ======================
+# ====================== Local Fallback ======================
 def load_local() -> int:
     if not os.path.isdir(LOCAL_STORE_DIR):
         return 0
@@ -195,7 +193,7 @@ def load_local() -> int:
                     loaded += 1
     return loaded
 
-# ====================== Upload (adaptado para CSV) ======================
+# ====================== Upload ======================
 def upload_file(file, kind: str) -> Optional[pd.DataFrame]:
     if not file or not any(tok in file.name.lower() for tok in KEYS.get(kind, [])):
         return None
@@ -241,7 +239,7 @@ with st.sidebar:
         if st.session_state["months"]:
             st.write("**Meses carregados:**")
             for m in sorted(st.session_state["months"].keys()):
-                st.write(f"✅ {m}")
+                st.write(f"{m}")
 
     st.subheader("Upload CSV")
     uploads = {
@@ -298,13 +296,20 @@ with tabs[0]:
     else:
         total = completed = csat = wait_h = evaluated = coverage = np.nan
 
+        # CORRIGIDO: soma segura de colunas numéricas
+        def safe_sum(df: pd.DataFrame) -> float:
+            if df.empty:
+                return np.nan
+            num = df.select_dtypes(include="number")
+            return num.sum().sum() if not num.empty else np.nan
+
         df = p.get("total_atendimentos")
         if isinstance(df, pd.DataFrame): 
-            total = int(pd.to_numeric(df.select_dtypes("number"), errors="coerce").sum().sum())
+            total = safe_sum(df)
 
         df = p.get("total_atendimentos_conc")
         if isinstance(df, pd.DataFrame): 
-            completed = int(pd.to_numeric(df.select_dtypes("number"), errors="coerce").sum().sum())
+            completed = safe_sum(df)
 
         df = p.get("media_csat")
         if isinstance(df, pd.DataFrame) and (col := find(df, ["avg", "Média CSAT"])):
@@ -316,7 +321,7 @@ with tabs[0]:
 
         df = p.get("csat")
         if isinstance(df, pd.DataFrame) and (col := find(df, ["score_total", "Respostas CSAT"])):
-            evaluated = int(pd.to_numeric(df[col], errors="coerce").sum())
+            evaluated = pd.to_numeric(df[col], errors="coerce").sum()
 
         coverage = evaluated / completed * 100 if completed and completed > 0 else np.nan
         completion_pct = completed / total * 100 if total and total > 0 else np.nan
@@ -381,11 +386,9 @@ with tabs[2]:
             p = st.session_state["months"][m]
             total = completed = csat = wait_h = coverage = np.nan
             df = p.get("total_atendimentos")
-            if isinstance(df, pd.DataFrame): 
-                total = int(pd.to_numeric(df.select_dtypes("number"), errors="coerce").sum().sum())
+            if isinstance(df, pd.DataFrame): total = safe_sum(df)
             df = p.get("total_atendimentos_conc")
-            if isinstance(df, pd.DataFrame): 
-                completed = int(pd.to_numeric(df.select_dtypes("number"), errors="coerce").sum().sum())
+            if isinstance(df, pd.DataFrame): completed = safe_sum(df)
             df = p.get("media_csat")
             if isinstance(df, pd.DataFrame) and (col := find(df, ["avg"])): 
                 csat = pd.to_numeric(df[col], errors="coerce").mean()
@@ -395,7 +398,7 @@ with tabs[2]:
             evaluated = 0
             df = p.get("csat")
             if isinstance(df, pd.DataFrame) and (col := find(df, ["score_total"])): 
-                evaluated = int(pd.to_numeric(df[col], errors="coerce").sum())
+                evaluated = pd.to_numeric(df[col], errors="coerce").sum()
             coverage = evaluated / completed * 100 if completed and completed > 0 else np.nan
             rows.append({
                 "Mês": m,
@@ -416,12 +419,12 @@ with tabs[2]:
 # 4) Dicionário
 with tabs[3]:
     st.markdown("""
-### Dicionário de Dados (adaptado para CSV)
-- `csat_by_cat.csv` ou `csat.csv` → CSAT por categoria (col: Categoria, score_total)  
-- `csat_avg.csv` → CSAT médio (col: avg)  
-- `by_channel.csv` → TMA por canal (col: Canal, mean_total, etc.)  
-- `handle_avg.csv` → TMA geral (col: mean_total)  
-- `wait_avg.csv` → TME geral (col: mean_total)  
-- `total.csv` → Total atendimentos (col: total_tickets)  
-- `completed.csv` → Concluídos (col: total_tickets)  
+### Dicionário de Dados (CSV)
+- `csat_by_cat.csv` → CSAT por categoria  
+- `csat_avg.csv` → CSAT médio  
+- `by_channel.csv` → TMA por canal  
+- `handle_avg.csv` → TMA geral  
+- `wait_avg.csv` → TME geral  
+- `total.csv` → Total de atendimentos  
+- `completed.csv` → Atendimentos concluídos  
 """)
