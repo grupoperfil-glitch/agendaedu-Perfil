@@ -151,7 +151,7 @@ def build_by_channel(payload: dict) -> dict:
     for df in dfs[1:]:
         merged = merged.merge(df, on="Canal", how="outer")
     if (col := find(merged, ["Média CSAT", "media csat", "avg"])) and col != "Média CSAT":
-        merged.rename(columns={col: "Média CSAT"}, inplace=True)
+        merged.rename(columns={	alert: "Média CSAT"}, inplace=True)
     if (col := find(merged, ["Respostas CSAT", "score_total", "qtd", "qtde"])) and col != "Respostas CSAT":
         merged.rename(columns={col: "Respostas CSAT"}, inplace=True)
     payload["by_channel"] = merged
@@ -245,7 +245,7 @@ with st.sidebar:
         if st.session_state["months"]:
             st.write("**Meses carregados:**")
             for m in sorted(st.session_state["months"].keys()):
-                st.write(f"✅ {m}")
+                st.write(f"{m}")
 
     st.subheader("Upload")
     uploads = {
@@ -303,10 +303,12 @@ with tabs[0]:
         total = completed = csat = wait_h = evaluated = coverage = np.nan
 
         df = p.get("total_atendimentos")
-        if isinstance(df, pd.DataFrame): total = int(pd.to_numeric(df.select_dtypes("number"), errors="coerce").sum().sum())
+        if isinstance(df, pd.DataFrame): 
+            total = int(pd.to_numeric(df.select_dtypes("number"), errors="coerce").sum().sum())
 
         df = p.get("total_atendimentos_conc")
-        if isinstance(df, pd.DataFrame): completed = int(pd.to_numeric(df.select_dtypes("number"), errors="coerce").sum().sum())
+        if isinstance(df, pd.DataFrame): 
+            completed = int(pd.to_numeric(df.select_dtypes("number"), errors="coerce").sum().sum())
 
         df = p.get("media_csat")
         if isinstance(df, pd.DataFrame) and (col := find(df, ["avg", "Média CSAT"])):
@@ -324,10 +326,14 @@ with tabs[0]:
         completion_pct = completed / total * 100 if total and total > 0 else np.nan
 
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Conclusão >90%", f"{completion_pct:.1f}%" if not pd.isna(completion_pct) else "-", delta="OK" if completion_pct >= SLA["completion"] else "BAIXO")
-        c2.metric("1º Resp <24h", f"{wait_h:.2f}h" if not pd.isna(wait_h) else "-", delta="OK" if wait_h < SLA["wait_h"] else "ALTO")
-        c3.metric("CSAT ≥4.0", f"{csat:.2f}" if not pd.isna(csat) else "-", delta="OK" if csat >= SLA["csat"] else "BAIXO")
-        c4.metric("Cobertura ≥75%", f"{coverage:.1f}%" if not pd.isna(coverage) else "-", delta="OK" if coverage >= SLA["coverage"] else "BAIXO")
+        c1.metric("Conclusão >90%", f"{completion_pct:.1f}%" if not pd.isna(completion_pct) else "-", 
+                  delta="OK" if completion_pct >= SLA["completion"] else "BAIXO")
+        c2.metric("1º Resp <24h", f"{wait_h:.2f}h" if not pd.isna(wait_h) else "-", 
+                  delta="OK" if wait_h < SLA["wait_h"] else "ALTO")
+        c3.metric("CSAT ≥4.0", f"{csat:.2f}" if not pd.isna(csat) else "-", 
+                  delta="OK" if csat >= SLA["csat"] else "BAIXO")
+        c4.metric("Cobertura ≥75%", f"{coverage:.1f}%" if not pd.isna(coverage) else "-", 
+                  delta="OK" if coverage >= SLA["coverage"] else "BAIXO")
 
         df_dist = p.get("csat")
         if isinstance(df_dist, pd.DataFrame):
@@ -379,16 +385,21 @@ with tabs[2]:
             p = st.session_state["months"][m]
             total = completed = csat = wait_h = coverage = np.nan
             df = p.get("total_atendimentos")
-            if isinstance(df, pd.DataFrame): total = int(pd.to_numeric(df.select_dtypes("number"), errors="coerce").sum().sum())
+            if isinstance(df, pd.DataFrame): 
+                total = int(pd.to_numeric(df.select_dtypes("number"), errors="coerce").sum().sum())
             df = p.get("total_atendimentos_conc")
-            if isinstance(df, pd.DataFrame): completed = int(pd.to_numeric(df.select_dtypes("number"), errors="coerce").sum().sum())
+            if isinstance(df, pd.DataFrame): 
+                completed = int(pd.to_numeric(df.select_dtypes("number"), errors="coerce").sum().sum())
             df = p.get("media_csat")
-            if isinstance(df, pd.DataFrame) and (col := find(df, ["avg"])): csat = pd.to_numeric(df[col], errors="coerce").mean()
+            if isinstance(df, pd.DataFrame) and (col := find(df, ["avg"])): 
+                csat = pd.to_numeric(df[col], errors="coerce").mean()
             df = p.get("tme_geral")
-            if isinstance(df, pd.DataFrame) and (col := find(df, ["mean_total"])): wait_h = to_hours(df[col]).mean()
+            if isinstance(df, pd.DataFrame) and (col := find(df, ["mean_total"])): 
+                wait_h = to_hours(df[col]).mean()
             evaluated = 0
             df = p.get("csat")
-            if isinstance(df, pd.DataFrame) and (col := find(df, ["score_total"])): evaluated = int(pd.to_numeric(df[col], errors="coerce").sum())
+            if isinstance(df, pd.DataFrame) and (col := find(df, ["score_total"])): 
+                evaluated = int(pd.to_numeric(df[col], errors="coerce").sum())
             coverage = evaluated / completed * 100 if completed and completed > 0 else np.nan
             rows.append({
                 "Mês": m,
@@ -409,9 +420,12 @@ with tabs[2]:
 # 4) Dicionário
 with tabs[3]:
     st.markdown("""
-    ### Dicionário de Dados
-    - `data_product__csat_*.xlsx` → CSAT por categoria  
-    - `data_product__media_csat_*.xlsx` → CSAT médio  
-    - `tempo_medio_de_atendimento_por_canal_*.xlsx` → TMA por canal  
-    - `tempo_medio_de_atendimento_*.xlsx` → TMA geral  
-    - `tempo_medio_de_espera_*.xlsx` → TME geral
+### Dicionário de Dados
+- `data_product__csat_*.xlsx` → CSAT por categoria  
+- `data_product__media_csat_*.xlsx` → CSAT médio  
+- `tempo_medio_de_atendimento_por_canal_*.xlsx` → TMA por canal  
+- `tempo_medio_de_atendimento_*.xlsx` → TMA geral  
+- `tempo_medio_de_espera_*.xlsx` → TME geral  
+- `total_de_atendimentos_*.xlsx` → Total  
+- `total_de_atendimentos_concluidos_*.xlsx` → Concluídos  
+""")
