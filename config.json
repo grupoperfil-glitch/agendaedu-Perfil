@@ -1,0 +1,280 @@
+{
+  "dashboard_config": {
+    "_comment": "Arquivo de configuração principal para o Dashboard de CSAT via Streamlit.",
+    "secrets_config": {
+      "_comment": "Define as chaves esperadas no Streamlit Secrets (st.secrets).",
+      "GH_TOKEN": "required_secret",
+      "GH_REPO": "grupoperfil-glitch/csat-dashboard-data",
+      "GH_PATH": "<placeholder_base_path_if_any>",
+      "GH_BRANCH": "main",
+      "GH_COMMITS_AUTHOR_NAME": "CSAT Dashboard Bot",
+      "GH_COMMITS_AUTHOR_EMAIL": "bot@example.com"
+    },
+    "companies": [
+      {
+        "name": "Escola Villa Criar",
+        "data_path_segment": "datavilla",
+        "_comment": "Segmento de path usado para upload e leitura: GH_REPO/datavilla/YYYY-MM/"
+      },
+      {
+        "name": "Colégio Perfil",
+        "data_path_segment": "data",
+        "_comment": "Segmento de path usado para upload e leitura: GH_REPO/data/YYYY-MM/"
+      }
+    ],
+    "data_source_files": {
+      "_comment": "Mapeamento dos nomes de arquivos esperados dentro de cada pasta mensal (ex: data/2024-05/...).",
+      "total_atendimentos": "total_de_atendimentos.csv",
+      "concluidos": "total_de_atendimentos_concluidos.csv",
+      "tempo_atendimento": "tempo_medio_de_atendimento.csv",
+      "tempo_espera": "tempo_medio_de_espera.csv",
+      "media_csat": "_data_product__media_csat.csv",
+      "dist_csat": "_data_product__csat.csv",
+      "por_canal": "tempo_medio_de_atendimento_por_canal.csv"
+    },
+    "upload_config": {
+      "title": "Upload de Dados Mensais",
+      "description": "Selecione a empresa, o mês de referência e os arquivos CSV para enviar ao repositório de dados.",
+      "github_repo_secrets_map": {
+        "token": "GH_TOKEN",
+        "repo": "GH_REPO",
+        "branch": "GH_BRANCH",
+        "author_name": "GH_COMMITS_AUTHOR_NAME",
+        "author_email": "GH_COMMITS_AUTHOR_EMAIL"
+      },
+      "required_inputs": [
+        {
+          "id": "empresa",
+          "label": "Empresa",
+          "type": "select",
+          "options_ref": "companies"
+        },
+        {
+          "id": "mes_referencia",
+          "label": "Mês de Referência",
+          "type": "month_picker",
+          "format": "YYYY-MM"
+        }
+      ],
+      "required_files": [
+        {
+          "id": "file_total_atendimentos",
+          "label": "Total de Atendimentos",
+          "target_filename_ref": "data_source_files.total_atendimentos"
+        },
+        {
+          "id": "file_concluidos",
+          "label": "Atendimentos Concluídos",
+          "target_filename_ref": "data_source_files.concluidos"
+        },
+        {
+          "id": "file_tempo_atendimento",
+          "label": "Tempo Médio de Atendimento",
+          "target_filename_ref": "data_source_files.tempo_atendimento"
+        },
+        {
+          "id": "file_tempo_espera",
+          "label": "Tempo Médio de Espera",
+          "target_filename_ref": "data_source_files.tempo_espera"
+        },
+        {
+          "id": "file_media_csat",
+          "label": "Média CSAT (Produto)",
+          "target_filename_ref": "data_source_files.media_csat"
+        },
+        {
+          "id": "file_dist_csat",
+          "label": "Distribuição CSAT (Produto)",
+          "target_filename_ref": "data_source_files.dist_csat"
+        },
+        {
+          "id": "file_por_canal",
+          "label": "Dados por Canal",
+          "target_filename_ref": "data_source_files.por_canal"
+        }
+      ]
+    },
+    "tabs": [
+      {
+        "name": "Visão Geral",
+        "_comment": "Indicadores macro para o mês selecionado.",
+        "indicators": [
+          {
+            "title": "Total de atendimentos",
+            "type": "metric",
+            "data_source_ref": "total_atendimentos",
+            "data_key": "total_tickets",
+            "goal": null
+          },
+          {
+            "title": "Atendimentos concluídos",
+            "type": "metric",
+            "data_source_ref": "concluidos",
+            "data_key": "total_tickets",
+            "goal": null
+          },
+          {
+            "title": "Porcentagem de atendimentos concluídos",
+            "type": "gauge",
+            "unit": "%",
+            "_comment": "Cálculo: (concluidos.total_tickets / total_atendimentos.total_tickets) * 100",
+            "calculation_required": true,
+            "numerator_ref": "concluidos.total_tickets",
+            "denominator_ref": "total_atendimentos.total_tickets",
+            "goal": 90,
+            "goal_direction": "higher_is_better"
+          },
+          {
+            "title": "Tempo médio de atendimento",
+            "type": "metric",
+            "data_source_ref": "tempo_atendimento",
+            "data_key": "mean_total",
+            "unit": "hh:mm:ss",
+            "goal": null
+          },
+          {
+            "title": "Tempo médio de espera",
+            "type": "metric",
+            "data_source_ref": "tempo_espera",
+            "data_key": "mean_total",
+            "unit": "hh:mm:ss",
+            "goal": "24:00:00",
+            "goal_direction": "lower_is_better"
+          },
+          {
+            "title": "Média CSAT",
+            "type": "metric",
+            "data_source_ref": "media_csat",
+            "data_key": "avg",
+            "goal": 4.0,
+            "goal_direction": "higher_is_better"
+          },
+          {
+            "title": "Porcentagem de atendimentos avaliados",
+            "type": "gauge",
+            "unit": "%",
+            "_comment": "Cálculo: (dist_csat.score_total.sum() / concluidos.total_tickets) * 100",
+            "calculation_required": true,
+            "numerator_ref": "dist_csat.score_total.sum",
+            "denominator_ref": "concluidos.total_tickets",
+            "goal": 75,
+            "goal_direction": "higher_is_better"
+          }
+        ],
+        "charts": [
+          {
+            "title": "Distribuição do CSAT",
+            "type": "bar_chart",
+            "data_source_ref": "dist_csat",
+            "x_axis": "Categoria",
+            "y_axis": "score_total",
+            "options": {
+              "sort_order": ["Muito Insatisfeito", "Insatisfeito", "Neutro", "Satisfeito", "Muito Satisfeito"]
+            }
+          }
+        ]
+      },
+      {
+        "name": "Por Canal",
+        "_comment": "Análise detalhada por canal de comunicação.",
+        "data_source_ref": "por_canal",
+        "controls": [
+          {
+            "type": "multiselect",
+            "id": "channel_selector",
+            "label": "Selecione os canais",
+            "data_column": "Canal",
+            "default_all": true
+          }
+        ],
+        "charts": [
+          {
+            "title": "Média CSAT por canal",
+            "type": "bar_chart",
+            "x_axis": "Canal",
+            "y_axis": "Média CSAT"
+          },
+          {
+            "title": "Tempo médio de atendimento por canal",
+            "type": "bar_chart",
+            "x_axis": "Canal",
+            "y_axis": "Tempo médio de atendimento",
+            "unit": "hours",
+            "_comment": "Requer conversão de hh:mm:ss para horas decimais."
+          },
+          {
+            "title": "Tempo médio de espera por canal",
+            "type": "bar_chart",
+            "x_axis": "Canal",
+            "y_axis": "Tempo médio de espera",
+            "unit": "hours",
+            "_comment": "Requer conversão de hh:mm:ss para horas decimais."
+          },
+          {
+            "title": "% de atendimentos concluídos por canal",
+            "type": "bar_chart",
+            "x_axis": "Canal",
+            "y_axis": "<placeholder_calculated_percent_concluidos>",
+            "unit": "%",
+            "_comment": "Cálculo: (Total de atendimentos concluídos / Total de atendimentos) * 100"
+          }
+        ]
+      },
+      {
+        "name": "Comparativo",
+        "_comment": "Gráficos de tendência comparando dados de vários meses.",
+        "controls": [
+          {
+            "type": "daterange",
+            "id": "month_range_selector",
+            "label": "Selecione o período (Mês/Ano)",
+            "granularity": "month"
+          }
+        ],
+        "charts": [
+          {
+            "title": "Média CSAT geral (Mensal)",
+            "type": "line_chart",
+            "data_source_ref": "media_csat",
+            "x_axis": "Mês",
+            "y_axis": "avg"
+          },
+          {
+            "title": "Média do tempo de espera geral (Mensal)",
+            "type": "line_chart",
+            "data_source_ref": "tempo_espera",
+            "x_axis": "Mês",
+            "y_axis": "mean_total",
+            "unit": "hours",
+            "_comment": "Requer conversão de hh:mm:ss para horas decimais."
+          },
+          {
+            "title": "Média do tempo total de atendimento (Mensal)",
+            "type": "line_chart",
+            "data_source_ref": "tempo_atendimento",
+            "x_axis": "Mês",
+            "y_axis": "mean_total",
+            "unit": "hours",
+            "_comment": "Requer conversão de hh:mm:ss para horas decimais."
+          },
+          {
+            "title": "Porcentagem de atendimentos concluídos (Mensal)",
+            "type": "line_chart",
+            "calculation_required": true,
+            "_comment": "Cálculo: (concluidos.total_tickets / total_atendimentos.total_tickets) * 100 para cada mês",
+            "x_axis": "Mês",
+            "y_axis": "Porcentagem",
+            "unit": "%"
+          },
+          {
+            "title": "Total de atendimentos recebidos (Mensal)",
+            "type": "bar_chart",
+            "data_source_ref": "total_atendimentos",
+            "x_axis": "Mês",
+            "y_axis": "total_tickets"
+          }
+        ]
+      }
+    ]
+  }
+}
