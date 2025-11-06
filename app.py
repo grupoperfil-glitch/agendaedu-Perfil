@@ -334,12 +334,12 @@ def load_data_from_github(mes_key: str) -> dict:
             if response.status_code == 404:
                 return {} # Retorna dicionário vazio (nenhum dado)
             
-            # --- INÍCIO DA ALTERAÇÃO 1 (LOG DE ERRO) ---
+            # --- LOG DE ERRO DETALHADO ---
             # Mostra outros erros (401, 403, 500) na tela
             st.error(f"Erro ao buscar dados ({api_url}): Status {response.status_code}")
             st.error(f"Verifique seus st.secrets (GH_TOKEN, GH_REPO) e permissões.")
             st.error(f"Resposta da API: {response.text}")
-            # --- FIM DA ALTERAÇÃO 1 ---
+            # --- FIM DO LOG DE ERRO ---
             return {}
             
         file_list = response.json()
@@ -401,14 +401,14 @@ def get_all_kpis() -> pd.DataFrame:
     
     try:
         response = requests.get(api_url, headers=headers)
-        # --- INÍCIO DA ALTERAÇÃO 2 (LOG DE ERRO) ---
+        # --- LOG DE ERRO DETALHADO ---
         if response.status_code != 200:
              # Erro ao listar os meses *é* um problema
             st.error(f"Erro ao listar pastas ({api_url}): Status {response.status_code}")
             st.error(f"Verifique seus st.secrets (GH_TOKEN, GH_REPO) e permissões.")
             st.error(f"Resposta da API: {response.text}")
             return pd.DataFrame()
-        # --- FIM DA ALTERAÇÃO 2 ---
+        # --- FIM DO LOG DE ERRO ---
             
         content = response.json()
         
@@ -539,9 +539,10 @@ st.sidebar.markdown(f"**Instituição:** `{EMPRESA_NOME_FIXO}`")
 col_m, col_y = st.sidebar.columns(2)
 today = date.today()
 if today.day <= 5:
+    # Se for o início do mês, assume o mês anterior como padrão
     today = today.replace(day=1) - pd.DateOffset(months=1)
 
-# --- INÍCIO DA ALTERAÇÃO 3 (ANOS DE ANÁLISE) ---
+# --- INÍCIO DA ALTERAÇÃO (ANOS DE ANÁLISE) ---
 year_list = list(range(2025, 2031)) # 2025 até 2030
 # Tenta encontrar o ano atual na lista, senão usa o primeiro (2025)
 try:
@@ -551,7 +552,7 @@ except ValueError:
 
 month = col_m.selectbox("Mês", list(range(1, 13)), index=today.month - 1)
 year = col_y.selectbox("Ano", year_list, index=default_index_anl)
-# --- FIM DA ALTERAÇÃO 3 ---
+# --- FIM DA ALTERAÇÃO (ANOS DE ANÁLISE) ---
 current_month_key = month_key(year, month)
 
 
@@ -563,7 +564,7 @@ with st.sidebar.expander("Upload de Novos Dados"):
     st.caption("Selecione o mês/ano de destino do upload:")
     col_um, col_uy = st.columns(2)
 
-    # --- INÍCIO DA ALTERAÇÃO 4 (ANOS DE UPLOAD) ---
+    # --- INÍCIO DA ALTERAÇÃO (ANOS DE UPLOAD) ---
     # Reutiliza a year_list definida acima
     # Tenta encontrar o ano atual na lista, senão usa o primeiro (2025)
     try:
@@ -573,22 +574,25 @@ with st.sidebar.expander("Upload de Novos Dados"):
 
     upload_month = col_um.selectbox("Mês (Destino)", list(range(1, 13)), index=today.month - 1, key="upload_mes")
     upload_year = col_uy.selectbox("Ano (Destino)", year_list, index=default_index_upl, key="upload_ano")
-    # --- FIM DA ALTERAÇÃO 4 ---
+    # --- FIM DA ALTERAÇÃO (ANOS DE UPLOAD) ---
     upload_month_key = month_key(upload_year, upload_month)
 
     st.markdown("---")
     st.caption(f"Os arquivos serão enviados para: `{EMPRESA_PATH_FIXO}/{upload_month_key}/`")
 
     # Mapeia os nomes de arquivo base para os tipos (ex: "dist_csat")
+    # --- INÍCIO DA ALTERAÇÃO (RÓTULOS DE UPLOAD) ---
+    # Ajusta os rótulos para refletir os nomes exatos dos arquivos.
     upload_map_config = {
-        "dist_csat": "1) CSAT (Distribuição)",
-        "media_csat": "2) CSAT (Média)",
-        "tempo_atendimento": "3) Tempo de Atendimento",
-        "tempo_espera": "4) Tempo de Espera",
-        "total_atendimentos": "5) Total de Atendimentos",
-        "concluidos": "6) Atendimentos Concluídos",
-        "por_canal": "7) Dados por Canal (Opcional)",
+        "dist_csat": "1) Distribuição CSAT (_data_product__csat_...)",
+        "media_csat": "2) Média CSAT (_data_product__media_csat_...)",
+        "tempo_atendimento": "3) Tempo Méd. Atendimento (tempo_medio_de_atendimento_...)",
+        "tempo_espera": "4) Tempo Méd. Espera (tempo_medio_de_espera_...)",
+        "total_atendimentos": "5) Total Atendimentos (total_de_atendimentos_...)",
+        "concluidos": "6) Atendimentos Concluídos (total_de_atendimentos_concluidos_...)",
+        "por_canal": "7) Dados Por Canal (tempo_medio_de_atendimento_por_canal_...)",
     }
+    # --- FIM DA ALTERAÇÃO (RÓTULOS DE UPLOAD) ---
 
     upload_files_map = {} # Armazena {UploadedFile: target_filename}
     
