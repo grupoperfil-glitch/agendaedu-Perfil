@@ -333,7 +333,14 @@ def load_data_from_github(mes_key: str) -> dict:
         if response.status_code != 200:
             if response.status_code == 404:
                 return {} # Retorna dicionário vazio (nenhum dado)
-            response.raise_for_status() 
+            
+            # --- INÍCIO DA ALTERAÇÃO 1 (LOG DE ERRO) ---
+            # Mostra outros erros (401, 403, 500) na tela
+            st.error(f"Erro ao buscar dados ({api_url}): Status {response.status_code}")
+            st.error(f"Verifique seus st.secrets (GH_TOKEN, GH_REPO) e permissões.")
+            st.error(f"Resposta da API: {response.text}")
+            # --- FIM DA ALTERAÇÃO 1 ---
+            return {}
             
         file_list = response.json()
         if not isinstance(file_list, list):
@@ -394,7 +401,15 @@ def get_all_kpis() -> pd.DataFrame:
     
     try:
         response = requests.get(api_url, headers=headers)
-        response.raise_for_status() 
+        # --- INÍCIO DA ALTERAÇÃO 2 (LOG DE ERRO) ---
+        if response.status_code != 200:
+             # Erro ao listar os meses *é* um problema
+            st.error(f"Erro ao listar pastas ({api_url}): Status {response.status_code}")
+            st.error(f"Verifique seus st.secrets (GH_TOKEN, GH_REPO) e permissões.")
+            st.error(f"Resposta da API: {response.text}")
+            return pd.DataFrame()
+        # --- FIM DA ALTERAÇÃO 2 ---
+            
         content = response.json()
         
         month_keys = sorted([
@@ -525,9 +540,18 @@ col_m, col_y = st.sidebar.columns(2)
 today = date.today()
 if today.day <= 5:
     today = today.replace(day=1) - pd.DateOffset(months=1)
-    
+
+# --- INÍCIO DA ALTERAÇÃO 3 (ANOS DE ANÁLISE) ---
+year_list = list(range(2025, 2031)) # 2025 até 2030
+# Tenta encontrar o ano atual na lista, senão usa o primeiro (2025)
+try:
+    default_index_anl = year_list.index(today.year)
+except ValueError:
+    default_index_anl = 0 # Padrão é 2025
+
 month = col_m.selectbox("Mês", list(range(1, 13)), index=today.month - 1)
-year = col_y.selectbox("Ano", list(range(2024, today.year + 2)), index=today.year - 2024)
+year = col_y.selectbox("Ano", year_list, index=default_index_anl)
+# --- FIM DA ALTERAÇÃO 3 ---
 current_month_key = month_key(year, month)
 
 
@@ -538,8 +562,18 @@ with st.sidebar.expander("Upload de Novos Dados"):
     # Mês/Ano para Upload
     st.caption("Selecione o mês/ano de destino do upload:")
     col_um, col_uy = st.columns(2)
+
+    # --- INÍCIO DA ALTERAÇÃO 4 (ANOS DE UPLOAD) ---
+    # Reutiliza a year_list definida acima
+    # Tenta encontrar o ano atual na lista, senão usa o primeiro (2025)
+    try:
+        default_index_upl = year_list.index(today.year)
+    except ValueError:
+        default_index_upl = 0 # Padrão é 2025
+
     upload_month = col_um.selectbox("Mês (Destino)", list(range(1, 13)), index=today.month - 1, key="upload_mes")
-    upload_year = col_uy.selectbox("Ano (Destino)", list(range(2024, today.year + 2)), index=today.year - 2024, key="upload_ano")
+    upload_year = col_uy.selectbox("Ano (Destino)", year_list, index=default_index_upl, key="upload_ano")
+    # --- FIM DA ALTERAÇÃO 4 ---
     upload_month_key = month_key(upload_year, upload_month)
 
     st.markdown("---")
