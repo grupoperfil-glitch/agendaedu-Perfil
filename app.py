@@ -1,6 +1,8 @@
 # app.py — Dashboard CSAT Mensal — Persistência GitHub
 # Este app lê a configuração de 'config.json' e usa a API do GitHub
 # para ler os arquivos de dados e fazer upload de novos arquivos.
+# v3: Corrigida a lógica de carregamento para usar a API e regex
+#     para encontrar arquivos com timestamps.
 
 import streamlit as st
 import pandas as pd
@@ -39,10 +41,17 @@ if not CONFIG:
 # Mapeia as configurações do JSON para as constantes que o código original usava
 # Isso nos permite reutilizar 90% das funções de helper sem modificá-las.
 try:
-    # Mapeia os nomes de arquivos esperados
+    # Mapeia os nomes de arquivos base do config para os padrões Regex
+    # O config.json tem os nomes *base* (ex: _data_product__csat.csv)
+    # FILE_PATTERNS mapeia os *tipos* (ex: dist_csat) para Regex
     FILE_PATTERNS = {
-        key: f"^{re.escape(name).replace('_*.', '.*')}$"
-        for key, name in CONFIG['data_source_files'].items()
+        "dist_csat": r"^_data_product__csat_.*\.csv$",
+        "media_csat": r"^_data_product__media_csat_.*\.csv$",
+        "tempo_atendimento": r"^tempo_medio_de_atendimento_.*\.csv$",
+        "tempo_espera": r"^tempo_medio_de_espera_.*\.csv$",
+        "total_atendimentos": r"^total_de_atendimentos_.*\.csv$",
+        "concluidos": r"^total_de_atendimentos_concluidos_.*\.csv$",
+        "por_canal": r"^tempo_medio_de_atendimento_por_canal_.*\.csv$",
     }
     
     # Mapeia as metas de SLA
@@ -335,34 +344,75 @@ def sla_flags(kpis: dict):
 def load_data_from_github(empresa_path: str, mes_key: str) -> dict:
     """
     Baixa todos os arquivos de dados de um mês/empresa específico do GitHub.
-    Retorna um dicionário de DataFrames brutos, pronto para 'validate_and_clean'.
+    Esta função agora usa a API para LISTAR os arquivos, pois os
+    nomes contêm timestamps.
     """
     try:
+        token = st.secrets["GH_TOKEN"] # <- Token é necessário
         repo_name = st.secrets["GH_REPO"]
         branch = st.secrets["GH_BRANCH"]
     except KeyError as e:
-        st.error(f"ERRO: Segredo do Streamlit não encontrado: {e}. Por favor, configure os segredos do GitHub.")
+        st.error(f"ERRO: Segredo do Streamlit não encontrado: {e}.")
         return {}
         
-    base_url = f"https://raw.githubusercontent.com/{repo_name}/{branch}/{empresa_path}/{mes_key}"
-    
-    month_data_raw = {}
-    data_files_map = CONFIG['data_source_files']
-    
-    # Paralelizar downloads (se houver muitos arquivos, considere 'threading')
-    # Para 7 arquivos, o sequencial é rápido o suficiente.
-    for file_type, file_name in data_files_map.items():
-        url = f"{base_url}/{file_name}"
-        try:
-            df = pd.read_csv(url)
-            month_data_raw[file_type] = df
-        except Exception as e:
-            # Não é um erro fatal, o arquivo pode ser opcional ou ainda não existir
-            if file_type not in OPTIONAL_TYPES:
-                # Silencioso, a validação principal tratará disso
-                pass
+    # 1. Montar a URL da API para o *diretório*
+    api_url = f"https://api.github.com/repos/{repo_name}/contents/{empresa_path}/{mes_key}?ref={branch}"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+
+    # 2. Obter a lista de arquivos no diretório
+    try:
+        response = requests.get(api_url, headers=headers)
+        if response.status_code != 200:
+            # Se o diretório não for encontrado (404), é um mês vazio, não um erro.
+            if response.status_code == 404:
+                return {} # Retorna dicionário vazio (nenhum dado)
+            # Outros erros
+            response.raise_for_status() 
             
+        file_list = response.json()
+        if not isinstance(file_list, list):
+            st.warning(f"Resposta inesperada da API do GitHub para {mes_key}.")
+            return {}
+            
+    except Exception as e:
+        st.error(f"Falha ao listar arquivos do GitHub para {mes_key}: {e}")
+        return {}
+
+    # 3. Mapear os padrões de arquivo (do config) para os arquivos reais
+    month_data_raw = {}
+    
+    # Itera sobre os *tipos* que precisamos (ex: "total_atendimentos")
+    for file_type, pattern_regex in FILE_PATTERNS.items():
+        if not pattern_regex:
+            continue
+
+        # 4. Encontra o arquivo correspondente na lista da API
+        found_file = None
+        for file_item in file_list:
+            if file_item['type'] == 'file' and re.match(pattern_regex, file_item['name'], flags=re.IGNORECASE):
+                found_file = file_item
+                break # Encontramos o primeiro que bate
+        
+        # 5. Se encontramos, baixa o arquivo
+        if found_file:
+            download_url = found_file.get('download_url')
+            if download_url:
+                try:
+                    df = pd.read_csv(download_url)
+                    month_data_raw[file_type] = df
+                except Exception as e:
+                    st.warning(f"Falha ao ler o arquivo {found_file['name']}: {e}")
+        else:
+            if file_type not in OPTIONAL_TYPES:
+                # O arquivo obrigatório não foi encontrado
+                # A lógica de validação principal vai pegar isso
+                pass
+
     return month_data_raw
+
 
 @st.cache_data(ttl=3600) # Cache de 1 hora
 def get_all_kpis(empresa_path: str) -> pd.DataFrame:
@@ -437,6 +487,7 @@ def get_all_kpis(empresa_path: str) -> pd.DataFrame:
 def upload_to_github(file_content: bytes, empresa_path: str, mes_key: str, target_filename: str):
     """
     Faz upload (ou atualização) de um único arquivo para o repositório GitHub.
+    NOTA: O target_filename agora é o *nome de destino*, que pode incluir um timestamp.
     """
     try:
         # Pega os segredos
@@ -461,6 +512,9 @@ def upload_to_github(file_content: bytes, empresa_path: str, mes_key: str, targe
     }
     
     # 1. Verifica se o arquivo já existe para obter o 'sha' (necessário para update)
+    #    NOTA: Como os nomes agora têm timestamps, é provável que *nunca* exista.
+    #    Para uma versão "correta", deveríamos listar, deletar o antigo e enviar o novo.
+    #    Mas, por simplicidade, vamos apenas sobrescrever se o nome for *exato*.
     sha = None
     try:
         response_get = requests.get(api_url, headers=headers)
@@ -558,23 +612,26 @@ with st.sidebar.expander("Upload de Novos Dados"):
     st.caption(f"Os arquivos serão enviados para: `{empresa_path_upload}/{upload_month_key}/`")
 
     # Gera os uploaders dinamicamente a partir do config.json
-    upload_files_map = {} # Armazena {UploadedFile: target_filename}
+    upload_files_map = {} # Armazena {UploadedFile: target_filename_base}
     
     for file_config in CONFIG['upload_config']['required_files']:
         file_id = file_config['id']
         label = file_config['label']
-        # Pega o nome do arquivo de destino (ex: "total_de_atendimentos.csv")
+        # Pega o nome do arquivo de *destino* (ex: "total_de_atendimentos.csv")
+        # Este é o nome base do config
         target_name_key = file_config['target_filename_ref'].split('.')[-1]
-        target_name = CONFIG['data_source_files'][target_name_key]
+        target_name_base = CONFIG['data_source_files'][target_name_key]
         
         uploaded_file = st.file_uploader(label, type=["csv"], key=file_id)
         
         if uploaded_file:
-            # Verifica se o nome do arquivo bate com o padrão
+            # Verifica se o nome do arquivo *upado* bate com o padrão
             if not re.match(FILE_PATTERNS[target_name_key], uploaded_file.name, flags=re.IGNORECASE):
                 st.warning(f"O nome '{uploaded_file.name}' não parece ser um arquivo de '{label}'. Verifique o arquivo.")
             
-            upload_files_map[uploaded_file] = target_name
+            # Armazena o arquivo upado e o *nome do arquivo original*
+            # Não usamos mais o nome base, usamos o nome original do arquivo
+            upload_files_map[uploaded_file] = uploaded_file.name 
 
     # Botão de Envio
     if st.button("Enviar Arquivos para o GitHub"):
@@ -597,6 +654,8 @@ with st.sidebar.expander("Upload de Novos Dados"):
                 success_count = 0
                 for uploaded_file, target_filename in upload_files_map.items():
                     file_content = uploaded_file.getvalue()
+                    
+                    # Usamos o target_filename (nome original do arquivo upado)
                     if upload_to_github(file_content, empresa_path_upload, upload_month_key, target_filename):
                         success_count += 1
                 
@@ -629,6 +688,10 @@ tabs = st.tabs(tab_names)
 # --- 1) Visão Geral ---
 with tabs[0]:
     config_tab1 = tab_configs[0]
+
+    # --- FIX (do bug anterior) ---
+    # Definimos 'cleaned' como um dicionário vazio aqui.
+    cleaned = {} 
     
     if not raw_month_data:
         st.info(f"Nenhum dado encontrado para '{empresa_selecionada_nome}' em '{current_month_key}' no GitHub.")
@@ -640,9 +703,13 @@ with tabs[0]:
         missing_files = []
         for req in REQUIRED_TYPES:
             if req not in cleaned:
-                missing_files.append(CONFIG['data_source_files'].get(req, req))
+                # Encontra o nome base do arquivo no config
+                base_name = CONFIG['data_source_files'].get(req, req)
+                # Tira o .csv e adiciona _*.csv para clareza
+                pattern_name = base_name.replace('.csv', '_*.csv')
+                missing_files.append(pattern_name)
         if missing_files:
-            st.warning(f"Arquivos obrigatórios ausentes em {current_month_key}: {', '.join(missing_files)}")
+            st.warning(f"Arquivos obrigatórios ausentes ou inválidos em {current_month_key}: {', '.join(missing_files)}")
         
         kpis = compute_kpis(cleaned)
         flags = sla_flags(kpis)
@@ -790,7 +857,8 @@ with tabs[3]:
     for key, name in CONFIG['data_source_files'].items():
         schema = EXPECTED_SCHEMAS.get(key)
         cols = f" (Colunas: `{', '.join(schema)}`)" if schema else ""
-        rows += f"<li><code>{name}</code> — Mapeado para <b>{key}</b>{cols}</li>"
+        pattern = FILE_PATTERNS.get(key, "").replace(r"\.", ".").replace(".*", "_*")
+        rows += f"<li>Padrão: <code>{pattern}</code> — Mapeado para <b>{key}</b>{cols}</li>"
     rows += "</ul>"
     st.markdown(rows, unsafe_allow_html=True)
 
