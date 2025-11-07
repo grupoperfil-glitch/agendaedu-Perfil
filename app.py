@@ -355,20 +355,53 @@ def load_data_from_github(mes_key: str) -> dict:
         st.error(f"Falha ao listar arquivos do GitHub para {mes_key}: {e}")
         return {}
 
+    # --- INÍCIO DO CÓDIGO DE DEBUG ---
+    st.warning(f"--- DEBUG INFO (Mês: {mes_key}) ---")
+    try:
+        found_files_list = [f['name'] for f in file_list if f['type'] == 'file']
+        st.write(f"Arquivos encontrados na pasta '{mes_key}':")
+        st.json(found_files_list)
+    except Exception as e:
+        st.error(f"Erro ao listar nomes de arquivos: {e}")
+    # --- FIM DO CÓDIGO DE DEBUG ---
+
+
     # 3. Mapear os padrões de arquivo para os arquivos reais
     month_data_raw = {}
     
+    # --- INÍCIO DO CÓDIGO DE DEBUG ---
+    st.write("Tentando encontrar correspondências:")
+    # --- FIM DO CÓDIGO DE DEBUG ---
+
     for file_type, pattern_regex in FILE_PATTERNS.items():
         if not pattern_regex:
             continue
 
         # 4. Encontra o arquivo correspondente na lista da API
         found_file = None
+        # --- INÍCIO DO CÓDIGO DE DEBUG ---
+        match_found_for_this_type = False
+        # --- FIM DO CÓDIGO DE DEBUG ---
         for file_item in file_list:
-            if file_item['type'] == 'file' and re.match(pattern_regex, file_item['name'], flags=re.IGNORECASE):
+            if file_item['type'] != 'file':
+                continue
+            
+            # --- INÍCIO DO CÓDIGO DE DEBUG ---
+            file_name = file_item['name']
+            match = re.match(pattern_regex, file_name, flags=re.IGNORECASE)
+            
+            if match:
+                st.success(f"✅ [SUCESSO] Padrão '{file_type}' ({pattern_regex}) correspondeu ao arquivo '{file_name}'")
                 found_file = file_item
-                break 
+                match_found_for_this_type = True
+                break # Pára de procurar *arquivos* assim que um bate com o *padrão*
+            # --- FIM DO CÓDIGO DE DEBUG ---
         
+        # --- INÍCIO DO CÓDIGO DE DEBUG ---
+        if not match_found_for_this_type:
+            st.error(f"❌ [FALHA] Padrão '{file_type}' ({pattern_regex}) não correspondeu a NENHUM arquivo.")
+        # --- FIM DO CÓDIGO DE DEBUG ---
+
         # 5. Se encontramos, baixa o arquivo
         if found_file:
             download_url = found_file.get('download_url')
@@ -379,6 +412,9 @@ def load_data_from_github(mes_key: str) -> dict:
                 except Exception as e:
                     st.warning(f"Falha ao ler o arquivo {found_file['name']}: {e}")
 
+    # --- INÍCIO DO CÓDIGO DE DEBUG ---
+    st.warning("--- FIM DO DEBUG INFO ---")
+    # --- FIM DO CÓDIGO DE DEBUG ---
     return month_data_raw
 
 
@@ -538,6 +574,7 @@ init_state()
 # --- 1. Seleção de Análise ---
 st.sidebar.title("Filtros de Análise")
 st.sidebar.markdown(f"**Instituição:** `{EMPRESA_NOME_FIXO}`")
+st.sidebar.caption("Versão: Debug RegEx v2") # <-- Mudei a versão
 
 # Seletores de Mês/Ano
 col_m, col_y = st.sidebar.columns(2)
