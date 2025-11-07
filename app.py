@@ -22,15 +22,19 @@ EMPRESA_PATH_FIXO = "data"
 EMPRESA_NOME_FIXO = "Colégio Perfil"
 
 # Mapeia os tipos para os padrões Regex
+# --- INÍCIO DA ALTERAÇÃO (Regex Flexível) ---
+# Torna o sufixo (ex: _timestamp) opcional para
+# corresponder a AMBOS os padrões de nome.
 FILE_PATTERNS = {
-    "dist_csat": r"^_data_product__csat_.*\.csv$",
-    "media_csat": r"^_data_product__media_csat_.*\.csv$",
-    "tempo_atendimento": r"^tempo_medio_de_atendimento_.*\.csv$",
-    "tempo_espera": r"^tempo_medio_de_espera_.*\.csv$",
-    "total_atendimentos": r"^total_de_atendimentos_.*\.csv$",
-    "concluidos": r"^total_de_atendimentos_concluidos_.*\.csv$",
-    "por_canal": r"^tempo_medio_de_atendimento_por_canal_.*\.csv$",
+    "dist_csat": r"^_data_product__csat(_.*)?\.csv$",
+    "media_csat": r"^_data_product__media_csat(_.*)?\.csv$",
+    "tempo_atendimento": r"^tempo_medio_de_atendimento(_.*)?\.csv$",
+    "tempo_espera": r"^tempo_medio_de_espera(_.*)?\.csv$",
+    "total_atendimentos": r"^total_de_atendimentos(_.*)?\.csv$",
+    "concluidos": r"^total_de_atendimentos_concluidos(_.*)?\.csv$",
+    "por_canal": r"^tempo_medio_de_atendimento_por_canal(_.*)?\.csv$",
 }
+# --- FIM DA ALTERAÇÃO ---
 
 # Metas de SLA
 SLA = {
