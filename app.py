@@ -22,17 +22,17 @@ EMPRESA_PATH_FIXO = "data"
 EMPRESA_NOME_FIXO = "Colégio Perfil"
 
 # Mapeia os tipos para os padrões Regex
-# --- INÍCIO DA ALTERAÇÃO (Regex Flexível) ---
-# Torna o sufixo (ex: _timestamp) opcional para
-# corresponder a AMBOS os padrões de nome.
+# --- INÍCIO DA ALTERAÇÃO (Regex Flexível v2) ---
+# Adiciona o operador | (OU) para aceitar os nomes de arquivo
+# antigos (ex: total.csv) OU os nomes novos (ex: total_de_atendimentos...csv)
 FILE_PATTERNS = {
-    "dist_csat": r"^_data_product__csat(_.*)?\.csv$",
-    "media_csat": r"^_data_product__media_csat(_.*)?\.csv$",
-    "tempo_atendimento": r"^tempo_medio_de_atendimento(_.*)?\.csv$",
-    "tempo_espera": r"^tempo_medio_de_espera(_.*)?\.csv$",
-    "total_atendimentos": r"^total_de_atendimentos(_.*)?\.csv$",
-    "concluidos": r"^total_de_atendimentos_concluidos(_.*)?\.csv$",
-    "por_canal": r"^tempo_medio_de_atendimento_por_canal(_.*)?\.csv$",
+    "dist_csat": r"^(_data_product__csat(_.*)?|csat_by_cat)\.csv$",
+    "media_csat": r"^(_data_product__media_csat(_.*)?|csat_avg)\.csv$",
+    "tempo_atendimento": r"^(tempo_medio_de_atendimento(_.*)?|handle_avg)\.csv$",
+    "tempo_espera": r"^(tempo_medio_de_espera(_.*)?|wait_avg)\.csv$",
+    "total_atendimentos": r"^(total_de_atendimentos(_.*)?|total)\.csv$",
+    "concluidos": r"^(total_de_atendimentos_concluidos(_.*)?|completed)\.csv$",
+    "por_canal": r"^(tempo_medio_de_atendimento_por_canal(_.*)?|by_channel)\.csv$",
 }
 # --- FIM DA ALTERAÇÃO ---
 
@@ -355,23 +355,8 @@ def load_data_from_github(mes_key: str) -> dict:
         st.error(f"Falha ao listar arquivos do GitHub para {mes_key}: {e}")
         return {}
 
-    # --- INÍCIO DO CÓDIGO DE DEBUG ---
-    st.warning(f"--- DEBUG INFO (Mês: {mes_key}) ---")
-    try:
-        found_files_list = [f['name'] for f in file_list if f['type'] == 'file']
-        st.write(f"Arquivos encontrados na pasta '{mes_key}':")
-        st.json(found_files_list)
-    except Exception as e:
-        st.error(f"Erro ao listar nomes de arquivos: {e}")
-    # --- FIM DO CÓDIGO DE DEBUG ---
-
-
     # 3. Mapear os padrões de arquivo para os arquivos reais
     month_data_raw = {}
-    
-    # --- INÍCIO DO CÓDIGO DE DEBUG ---
-    st.write("Tentando encontrar correspondências:")
-    # --- FIM DO CÓDIGO DE DEBUG ---
 
     for file_type, pattern_regex in FILE_PATTERNS.items():
         if not pattern_regex:
@@ -379,28 +364,16 @@ def load_data_from_github(mes_key: str) -> dict:
 
         # 4. Encontra o arquivo correspondente na lista da API
         found_file = None
-        # --- INÍCIO DO CÓDIGO DE DEBUG ---
-        match_found_for_this_type = False
-        # --- FIM DO CÓDIGO DE DEBUG ---
         for file_item in file_list:
             if file_item['type'] != 'file':
                 continue
             
-            # --- INÍCIO DO CÓDIGO DE DEBUG ---
             file_name = file_item['name']
             match = re.match(pattern_regex, file_name, flags=re.IGNORECASE)
             
             if match:
-                st.success(f"✅ [SUCESSO] Padrão '{file_type}' ({pattern_regex}) correspondeu ao arquivo '{file_name}'")
                 found_file = file_item
-                match_found_for_this_type = True
                 break # Pára de procurar *arquivos* assim que um bate com o *padrão*
-            # --- FIM DO CÓDIGO DE DEBUG ---
-        
-        # --- INÍCIO DO CÓDIGO DE DEBUG ---
-        if not match_found_for_this_type:
-            st.error(f"❌ [FALHA] Padrão '{file_type}' ({pattern_regex}) não correspondeu a NENHUM arquivo.")
-        # --- FIM DO CÓDIGO DE DEBUG ---
 
         # 5. Se encontramos, baixa o arquivo
         if found_file:
@@ -412,9 +385,6 @@ def load_data_from_github(mes_key: str) -> dict:
                 except Exception as e:
                     st.warning(f"Falha ao ler o arquivo {found_file['name']}: {e}")
 
-    # --- INÍCIO DO CÓDIGO DE DEBUG ---
-    st.warning("--- FIM DO DEBUG INFO ---")
-    # --- FIM DO CÓDIGO DE DEBUG ---
     return month_data_raw
 
 
@@ -469,6 +439,11 @@ def get_all_kpis() -> pd.DataFrame:
     
     for mkey in month_keys[:12]: # Limita a 12 meses
         try:
+            # --- IMPORTANTE: Limpa o cache da função de leitura ---
+            # para garantir que os dados de debug não sejam cacheados.
+            # (Removido na versão final, mas importante para debug)
+            # load_data_from_github.clear() # Desativado para performance
+            
             raw_data = load_data_from_github(mkey) # Não precisa mais de empresa_path
             if not raw_data:
                 continue
@@ -574,7 +549,7 @@ init_state()
 # --- 1. Seleção de Análise ---
 st.sidebar.title("Filtros de Análise")
 st.sidebar.markdown(f"**Instituição:** `{EMPRESA_NOME_FIXO}`")
-st.sidebar.caption("Versão: Debug RegEx v2") # <-- Mudei a versão
+st.sidebar.caption("Versão: Prod v3 (RegEx Flexível)") # <-- Mudei a versão
 
 # Seletores de Mês/Ano
 col_m, col_y = st.sidebar.columns(2)
